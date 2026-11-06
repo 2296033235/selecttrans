@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-This is a Windows 10/11 desktop translator requiring Python 3.11+ with Tkinter. `translator.py` contains configuration, BigModel requests, keyboard listeners, the Tkinter popup, tray controls, and speech playback. The tray icon is generated in code; there is no separate assets directory.
+This is a Windows 10/11 desktop translator requiring Python 3.11+ with Tkinter. `translator.py` contains configuration, BigModel requests, keyboard listeners, the Tkinter popup, tray controls, and speech playback. The tray icon is generated in code; there is no separate assets directory. The glass popup is a layered window drawn with Pillow from a capture of the screen behind it; its style lives in the `GLASS_*` constants, can be changed from the tray's appearance editor, and is saved in the `[glass]` section of `translator_config.ini`. `tools/glass_tuner.py` opens that editor over synthetic test backdrops.
 
-`tests/test_translator.py` covers language detection, configuration, translation requests, and Ctrl gestures. Root-level batch scripts handle setup, launching, startup registration, and packaging. `translator.spec` configures PyInstaller. Runtime dependencies are pinned in `requirements.txt`; `requirements-dev.txt` adds packaging tools.
+`tests/test_translator.py` covers language detection, configuration, translation requests, and Ctrl gestures. Root-level batch scripts handle setup, launching, startup registration, and packaging. `build.bat` holds the PyInstaller options; the generated spec lives in `build-public\` and is not tracked. Runtime dependencies are pinned in `requirements.txt`; `requirements-dev.txt` adds packaging tools.
 
 ## Build, Test, and Development Commands
 

@@ -12,6 +12,19 @@ else:
     translator = None
 
 
+def make_root(test):
+    root = translator.tk.Tk()
+    root.withdraw()
+
+    def destroy():
+        for job in root.tk.splitlist(root.tk.call('after', 'info')):
+            root.tk.call('after', 'cancel', job)
+        root.destroy()
+
+    test.addCleanup(destroy)
+    return root
+
+
 @unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
 class LanguageTests(unittest.TestCase):
     def test_english(self):
@@ -47,6 +60,47 @@ class ConfigTests(unittest.TestCase):
     def test_config_round_trip(self):
         translator.save_api_key('example.test-only')
         self.assertEqual(translator.load_api_key(), 'example.test-only')
+
+    def test_glass_style_and_api_key_share_the_config(self):
+        self.addCleanup(translator.set_glass_style, translator.get_glass_style())
+        translator.save_api_key('example.test-only')
+        translator.save_glass_style({**translator.GLASS_DEFAULT_STYLE, 'blur': 20})
+        translator.save_api_key('example.changed')
+        translator.set_glass_style(translator.GLASS_DEFAULT_STYLE)
+        translator.load_glass_style()
+        self.assertEqual(translator.GLASS_BLUR, 20)
+        self.assertEqual(translator.load_api_key(), 'example.changed')
+
+    @staticmethod
+    def _editor_buttons(editor):
+        return {widget.cget('text').strip(): widget
+                for frame in editor.winfo_children()[0].winfo_children()
+                for widget in frame.winfo_children()
+                if isinstance(widget, translator.tk.Button)}
+
+    def test_style_editor_previews_and_cancels_or_saves(self):
+        self.addCleanup(translator.set_glass_style, translator.get_glass_style())
+        root = make_root(self)
+
+        def blank(x, y, width, height, exclude_hwnd=None):
+            return translator.Image.new('RGB', (width, height))
+
+        with patch.object(translator, 'capture_backdrop', side_effect=blank), \
+             patch.object(translator, 'glass_supported', return_value=True):
+            editor = translator.open_style_editor(root)
+            self.assertIs(translator.open_style_editor(root), editor)
+            self.assertTrue(editor.preview.popup.winfo_exists())
+            self._editor_buttons(editor)['深色'].invoke()
+            self.assertEqual(translator.GLASS_TEXT_MODE, 'light')
+            self._editor_buttons(editor)['取消'].invoke()
+            self.assertEqual(translator.GLASS_TEXT_MODE, 'auto')
+            self.assertIsNone(translator._style_editor)
+
+            editor = translator.open_style_editor(root)
+            self._editor_buttons(editor)['磨砂'].invoke()
+            self._editor_buttons(editor)['保存'].invoke()
+        self.assertFalse(editor.winfo_exists())
+        self.assertIn('blur = 16', self.config.read_text(encoding='utf-8'))
 
     def test_source_directory(self):
         with patch.object(sys, 'frozen', False, create=True):
@@ -254,9 +308,7 @@ class PopupTests(unittest.TestCase):
         )
 
     def test_popup_repositions_after_translation_expands(self):
-        root = translator.tk.Tk()
-        root.withdraw()
-        self.addCleanup(root.destroy)
+        root = make_root(self)
         manager = translator.PopupManager(root)
         with patch.object(translator, 'get_work_area', return_value=(0, 0, 1000, 700)):
             manager._show('original', '翻译中…', 0, 0,
@@ -271,15 +323,242 @@ class PopupTests(unittest.TestCase):
             self.assertLess(popup.winfo_rooty() + popup.winfo_height(), 500)
 
     def test_popup_without_selection_bounds_stays_near_mouse(self):
-        root = translator.tk.Tk()
-        root.withdraw()
-        self.addCleanup(root.destroy)
+        root = make_root(self)
         manager = translator.PopupManager(root)
         with patch.object(translator, 'get_work_area', return_value=(0, 0, 2048, 1112)):
             manager._show('original', '翻译中…', 570, 263)
             popup = manager.popup
             self.assertEqual((popup.winfo_rootx(), popup.winfo_rooty()),
                              (582, 275))
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
+class GlassTests(unittest.TestCase):
+    def test_highlight_matches_size_and_keeps_center_clear(self):
+        image = translator.render_glass_highlight(370, 160)
+        self.assertEqual((image.mode, image.size), ('RGB', (370, 160)))
+        self.assertEqual(image.getpixel((185, 80)), (0, 0, 0))
+        self.assertGreater(image.convert('L').getextrema()[1], 100)
+
+    def test_highlight_glints_at_top_left_more_than_top_right(self):
+        image = translator.render_glass_highlight(370, 160).convert('L')
+        top_left = max(image.getpixel((40, y)) for y in range(5))
+        top_right = max(image.getpixel((330, y)) for y in range(5))
+        self.assertGreater(top_left, top_right * 1.5)
+
+    def test_sheen_stays_inside_top_padding(self):
+        image = translator.render_glass_highlight(370, 160).convert('L')
+        self.assertGreater(image.getpixel((185, 4)), 0)
+        self.assertEqual(
+            [image.getpixel((185, y))
+             for y in range(translator.GLASS_SHEEN_HEIGHT, 160 - 6)],
+            [0] * (160 - 6 - translator.GLASS_SHEEN_HEIGHT))
+
+    def test_glass_unsupported_when_transparency_disabled(self):
+        with patch.object(translator.winreg, 'OpenKey'), \
+             patch.object(translator.winreg, 'QueryValueEx', return_value=(0, 4)):
+            self.assertFalse(translator.glass_supported())
+        with patch.object(translator.winreg, 'OpenKey'), \
+             patch.object(translator.winreg, 'QueryValueEx', return_value=(1, 4)):
+            self.assertTrue(translator.glass_supported())
+
+    def test_sheen_scales_with_display(self):
+        image = translator.render_glass_highlight(560, 190, 1.5).convert('L')
+        sheen_end = round(translator.GLASS_SHEEN_HEIGHT * 1.5)
+        self.assertGreater(image.getpixel((280, sheen_end - 4)), 0)
+        self.assertEqual(
+            [image.getpixel((280, y)) for y in range(sheen_end, 190 - 9)],
+            [0] * (190 - 9 - sheen_end))
+
+    def test_dpi_awareness_prefers_per_monitor(self):
+        windll = Mock()
+        with patch.object(translator.ctypes, 'windll', windll):
+            translator.enable_dpi_awareness()
+        windll.shcore.SetProcessDpiAwareness.assert_called_once_with(2)
+        windll.user32.SetProcessDPIAware.assert_not_called()
+
+    def test_dpi_awareness_falls_back_to_system_aware(self):
+        windll = Mock()
+        windll.shcore.SetProcessDpiAwareness.side_effect = OSError
+        with patch.object(translator.ctypes, 'windll', windll):
+            translator.enable_dpi_awareness()
+        windll.user32.SetProcessDPIAware.assert_called_once_with()
+
+    def test_wrap_keeps_english_words_and_breaks_cjk_anywhere(self):
+        font = translator._glass_font(15)
+        self.assertEqual(
+            translator.wrap_text('hello world', font, font.getlength('hello wor')),
+            ['hello', 'world'])
+        self.assertEqual(
+            translator.wrap_text('一二三四五六', font, font.getlength('一二三')),
+            ['一二三', '四五六'])
+        self.assertEqual(translator.wrap_text('a\nb', font, 200), ['a', 'b'])
+
+    def test_wrap_splits_words_longer_than_a_line(self):
+        font = translator._glass_font(15)
+        width = font.getlength('abcde')
+        lines = translator.wrap_text('abcdefghijkl', font, width)
+        self.assertGreater(len(lines), 1)
+        self.assertEqual(''.join(lines), 'abcdefghijkl')
+        self.assertTrue(all(font.getlength(line) <= width for line in lines))
+
+    def setUp(self):
+        self.addCleanup(translator.set_glass_style, translator.get_glass_style())
+
+    def test_glass_popup_image_is_rounded_and_opaque_inside(self):
+        image, layout = translator.render_glass_popup('original', '译文', 1.0,
+                                                      speak_state='ready')
+        self.assertEqual(image.mode, 'RGBA')
+        self.assertEqual(image.width, translator.GLASS_WIDTH)
+        alpha = image.getchannel('A')
+        self.assertEqual(alpha.getpixel((0, 0)), 0)
+        self.assertGreaterEqual(alpha.getpixel((image.width // 2, 3)),
+                                translator.GLASS_SOLID_ALPHA)
+        copy_box, speak_box = layout['copy'], layout['speak']
+        self.assertLessEqual(copy_box[2], image.width)
+        self.assertLessEqual(copy_box[3], image.height)
+        self.assertLess(speak_box[2], copy_box[0] + 1)
+
+    def test_glass_popup_scales_and_limits_long_translations(self):
+        small, _ = translator.render_glass_popup('o', 'line\n' * 3, 1.0)
+        large, _ = translator.render_glass_popup('o', 'line\n' * 3, 1.5)
+        self.assertEqual(large.width, round(translator.GLASS_WIDTH * 1.5))
+        limit, _ = translator.render_glass_popup(
+            'o', 'line\n' * translator.GLASS_MAX_LINES, 1.0)
+        huge, _ = translator.render_glass_popup('o', 'line\n' * 100, 1.0)
+        self.assertEqual(huge.height, limit.height)
+        self.assertGreater(limit.height, small.height)
+
+    def test_text_color_follows_background_brightness(self):
+        box = (0, 0, 50, 50)
+        light = translator.Image.new('RGBA', (50, 50), (250, 250, 250, 255))
+        dark = translator.Image.new('RGBA', (50, 50), (20, 20, 30, 255))
+        dark_ink = translator._hex_rgb(translator.GLASS_TEXT)
+        light_ink = translator._hex_rgb(translator.GLASS_TEXT_LIGHT)
+        self.assertEqual(translator._glass_ink(light, box), (dark_ink, (255, 255, 255)))
+        self.assertEqual(translator._glass_ink(dark, box), (light_ink, (0, 0, 0)))
+        translator.set_glass_style({'text_mode': 'dark'})
+        self.assertEqual(translator._glass_ink(dark, box)[0], dark_ink)
+
+    def test_edges_refract_what_is_outside_the_glass(self):
+        translator.set_glass_style({'blur': 0, 'tint_alpha': 0, 'saturation': 100,
+                                    'brightness': 100, 'refraction': 10, 'rim': 0,
+                                    'sheen': 0, 'edge': 0})
+        margin = translator.glass_backdrop_margin()
+        backdrop = translator.Image.new('RGB', (200 + 2 * margin, 100 + 2 * margin), 'red')
+        backdrop.paste((0, 0, 255), (margin, margin, margin + 200, margin + 100))
+        glass = translator.render_glass_background(backdrop, (200, 100))
+        self.assertEqual(glass.getpixel((100, 50))[:3], (0, 0, 255))
+        self.assertGreater(glass.getpixel((1, 50))[0], 200)
+        translator.set_glass_style({'refraction': 0})
+        flat = translator.render_glass_background(backdrop, (200, 100))
+        self.assertEqual(flat.getpixel((1, 50))[:3], (0, 0, 255))
+
+    def test_style_values_are_validated(self):
+        translator.set_glass_style({'tint_color': '#ABCDEF', 'tint_alpha': '999',
+                                    'blur': 'x', 'text_mode': 'neon', 'text_dark': 'red'})
+        style = translator.get_glass_style()
+        self.assertEqual(style['tint_color'], '#abcdef')
+        self.assertEqual(style['tint_alpha'], 255)
+        self.assertEqual(style['blur'], translator.GLASS_DEFAULT_STYLE['blur'])
+        self.assertEqual(style['text_mode'], translator.GLASS_DEFAULT_STYLE['text_mode'])
+        self.assertEqual(style['text_dark'], translator.GLASS_DEFAULT_STYLE['text_dark'])
+
+    def _show_popup(self, glass, scale=1.0, backdrop='#3060c0'):
+        root = make_root(self)
+        with patch.object(translator, 'ui_scale', return_value=scale):
+            manager = translator.PopupManager(root, poll=False)
+        self.captures = []
+
+        def capture(x, y, width, height, exclude_hwnd=None):
+            self.captures.append(exclude_hwnd)
+            if backdrop is None:
+                return None
+            return translator.Image.new('RGB', (width, height), self.backdrop_color)
+
+        self.backdrop_color = backdrop
+        capture_patch = patch.object(translator, 'capture_backdrop', side_effect=capture)
+        capture_patch.start()
+        self.addCleanup(capture_patch.stop)
+        with patch.object(translator, 'glass_supported', return_value=glass):
+            manager._show('original', '翻译中…', 100, 100)
+        return manager
+
+    @staticmethod
+    def _click(manager, box, handler):
+        x, y = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+        px, py = manager._glass_pos
+        return handler(SimpleNamespace(x=x, y=y, x_root=px + x, y_root=py + y))
+
+    def test_glass_popup_shows_the_captured_backdrop(self):
+        manager = self._show_popup(glass=True)
+        manager.popup.update_idletasks()
+        self.assertEqual((manager.popup.winfo_width(), manager.popup.winfo_height()),
+                         manager._glass_image.size)
+        self.assertEqual(self.captures, [None])
+        center = manager._glass_image.getpixel((manager._glass_image.width // 2, 5))
+        self.assertGreater(center[2], center[0])
+        self.assertEqual(center[3], 255)
+
+    def test_glass_refreshes_only_when_the_backdrop_changes(self):
+        manager = self._show_popup(glass=True)
+        self.assertFalse(manager._glass_capture())
+        self.assertEqual(self.captures[-1], manager._glass_hwnd)
+        self.backdrop_color = '#c03030'
+        self.assertTrue(manager._glass_capture())
+
+    def test_glass_popup_turns_solid_when_capture_fails(self):
+        manager = self._show_popup(glass=True, backdrop=None)
+        alpha = manager._glass_image.getchannel('A')
+        self.assertEqual(alpha.getpixel((alpha.width // 2, alpha.height // 2)),
+                         translator.GLASS_SOLID_ALPHA)
+
+    def test_glass_copy_button_copies_whole_translation(self):
+        manager = self._show_popup(glass=True)
+        self.assertIsNone(manager._glass_hit(*manager._glass_layout['copy'][:2]))
+        manager._set_result('完整的译文')
+        box = manager._glass_layout['copy']
+        with patch.object(translator.pyperclip, 'copy') as copy:
+            self._click(manager, box, manager._glass_press)
+            self._click(manager, box, manager._glass_release)
+        copy.assert_called_once_with('完整的译文')
+        self.assertEqual(manager._copy_state, 'done')
+
+    def test_glass_speak_button_is_enabled_after_translation(self):
+        manager = self._show_popup(glass=True)
+        box = manager._glass_layout['speak']
+        self.assertIsNone(manager._glass_hit(box[0] + 2, box[1] + 2))
+        manager._set_result('译文')
+        with patch.object(translator, 'speak_text') as speak:
+            self._click(manager, manager._glass_layout['speak'], manager._glass_press)
+            self._click(manager, manager._glass_layout['speak'], manager._glass_release)
+        speak.assert_called_once()
+        self.assertEqual(speak.call_args.args[0], 'original')
+        self.assertEqual(manager._speak_state, 'busy')
+
+    def test_glass_popup_drags_from_blank_area(self):
+        manager = self._show_popup(glass=True)
+        start = manager._glass_pos
+        with patch.object(translator, 'get_work_area', return_value=(0, 0, 4000, 3000)):
+            manager._glass_press(SimpleNamespace(x=5, y=5, x_root=start[0] + 5,
+                                                 y_root=start[1] + 5))
+            manager._glass_drag(SimpleNamespace(x=5, y=5, x_root=start[0] + 105,
+                                                y_root=start[1] + 45))
+        self.assertTrue(manager._popup_dragged)
+        self.assertEqual(manager._glass_pos, (start[0] + 100, start[1] + 40))
+
+    def test_classic_popup_spacing_follows_display_scale(self):
+        manager = self._show_popup(glass=False, scale=1.5)
+        frame = manager.popup.winfo_children()[0]
+        self.assertEqual(int(frame.cget('padx')), 24)
+        self.assertEqual(int(frame.cget('pady')), 21)
+        original = frame.winfo_children()[0]
+        self.assertEqual(int(original.cget('wraplength')), 510)
+
+    def test_popup_falls_back_to_opaque_theme_without_glass(self):
+        manager = self._show_popup(glass=False)
+        self.assertEqual(manager.popup.cget('bg'), translator.BG)
+        self.assertAlmostEqual(float(manager.popup.attributes('-alpha')), 0.94, places=2)
 
 
 if __name__ == '__main__':
