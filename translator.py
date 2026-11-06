@@ -249,9 +249,6 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
                 icon.update_menu()
         root.after(0, _do)
 
-    def on_style(icon, item):
-        root.after(0, lambda: open_style_editor(root))
-
     def on_toggle_startup(icon, item):
         set_startup(not is_startup_enabled())
 
@@ -264,7 +261,6 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
         pystray.MenuItem(lambda item: f'模型：{API_MODEL or MODEL}', None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('接口设置（API Key / 模型）', on_settings),
-        pystray.MenuItem('外观设置', on_style),
         pystray.MenuItem('开机自启', on_toggle_startup,
                          checked=lambda item: is_startup_enabled()),
         pystray.Menu.SEPARATOR,

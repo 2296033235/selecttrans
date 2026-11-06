@@ -8,10 +8,10 @@ A lightweight Windows selection translator, activated by a double tap of Ctrl.
 
 - 双击左侧或右侧 `Ctrl` 翻译选中的文字，普通 `Ctrl+C`、`Ctrl+V` 不作为翻译快捷键。
 - 中译英、英译中，悬浮窗显示原文和译文，一键复制整段译文。
-- 悬浮窗采用透明液态玻璃风格：背后的画面轻微模糊后透出来，边缘有折射和高光描边，文字按背景深浅自动变色。颜色、透明度、模糊等都能在“外观设置”里自己调。
+- 悬浮窗采用透明液态玻璃风格：背后的画面轻微模糊后透出来，边缘有折射和高光描边，文字按背景深浅自动变色。
 - 点击朗读按钮收听原文。
 - 默认使用智谱 GLM，也可以在“更多设置”里换成任何 OpenAI 兼容接口（自定义接口地址、API Key 和模型）。
-- 系统托盘菜单支持接口设置（API Key / 接口地址 / 模型）、外观设置、管理开机自启和退出程序。
+- 系统托盘菜单支持接口设置（API Key / 接口地址 / 模型）、管理开机自启和退出程序。
 - Python 源码开放，可自行修改提示词、模型、快捷键参数和界面。
 
 ## 环境要求
@@ -56,7 +56,7 @@ py -3 -m venv .venv
 
 翻译完成后，点击悬浮窗外部区域关闭窗口。复制按钮（或 `Ctrl+C`）复制整段译文，朗读按钮朗读原文，按住空白处可以拖动。退出请右键点击系统托盘中的翻译工具图标，选择“退出”。
 
-右键托盘图标选择“外观设置”可以调整悬浮窗样式：先点一个预设（清透 / 磨砂 / 深色），再按需拖动滑块、点色块选颜色，旁边的预览框会实时变化。点“保存”后写入 `translator_config.ini` 的 `[glass]` 部分，下次启动仍然有效；点“取消”或关闭窗口则恢复打开前的样式。源码模式下也可以双击 `tools\glass_tuner.bat`，在几种测试背景上对比效果。
+悬浮窗样式默认使用“清透”预设，托盘菜单里不提供外观调整。想自己调时，在源码模式下双击 `tools\glass_tuner.bat`：先点一个预设（清透 / 磨砂 / 深色），再按需拖动滑块、点色块选颜色，旁边的预览框会实时变化。点“保存”后写入 `translator_config.ini` 的 `[glass]` 部分，EXE 读取同目录的这个文件时同样生效。
 
 API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常由首次设置窗口自动创建；需要手动配置时，可以复制 `translator_config.ini.example`，重命名为 `translator_config.ini`，再填写 `api_key`。右键托盘图标选择“接口设置（API Key / 模型）”可以随时修改。
 
@@ -86,7 +86,7 @@ API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常
 | `detect_lang()` | 语言判断规则 |
 | `speak_text()` | 朗读声音 |
 | `PopupManager` / 颜色常量 | 悬浮窗布局、颜色与交互 |
-| `GLASS_*` 常量 / `GLASS_PRESETS` | 玻璃的默认样式和预设；用户在“外观设置”里保存的值会覆盖默认值 |
+| `GLASS_*` 常量 / `GLASS_PRESETS` | 玻璃的默认样式和预设；`[glass]` 配置里保存的值会覆盖默认值 |
 | `render_glass_background()` / `render_glass_popup()` | 玻璃的绘制方式：模糊、饱和度、边缘折射、高光和文字 |
 
 “更多设置”只支持 OpenAI 兼容的 Chat Completions 接口（`Authorization: Bearer` 鉴权，返回 `choices[0].message.content`）。其他格式的服务商需要修改 `request_translation()` 的鉴权和请求/响应格式。
