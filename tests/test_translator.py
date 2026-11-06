@@ -61,6 +61,50 @@ class ConfigTests(unittest.TestCase):
         translator.save_api_key('example.test-only')
         self.assertEqual(translator.load_api_key(), 'example.test-only')
 
+    def test_api_settings_round_trip_and_default_to_empty(self):
+        self.assertEqual(translator.load_api_settings(),
+                         {'api_key': '', 'base_url': '', 'model': ''})
+        translator.save_api_settings('sk-test-only', 'https://api.example.com/v1', 'my-model')
+        self.assertEqual(translator.load_api_settings(),
+                         {'api_key': 'sk-test-only', 'base_url': 'https://api.example.com/v1',
+                          'model': 'my-model'})
+        translator.save_api_key('example.test-only')
+        self.assertEqual(translator.load_api_settings()['model'], 'my-model')
+
+    def test_old_config_without_endpoint_uses_defaults(self):
+        self.config.write_text('[settings]\napi_key = example.test-only\n', encoding='utf-8')
+        self.assertEqual(translator.load_api_settings(),
+                         {'api_key': 'example.test-only', 'base_url': '', 'model': ''})
+
+    def test_settings_dialog_returns_custom_endpoint_and_model(self):
+        root = make_root(self)
+
+        def widgets(widget, kind):
+            for child in widget.winfo_children():
+                if isinstance(child, kind):
+                    yield child
+                yield from widgets(child, kind)
+
+        def button(dialog, text):
+            return next(b for b in widgets(dialog, translator.tk.Button)
+                        if text in b.cget('text'))
+
+        def fill():
+            dialog = root.winfo_children()[-1]
+            button(dialog, '更多设置').invoke()
+            key, base, model = widgets(dialog, translator.tk.Entry)
+            for widget, value in ((key, 'sk-test-only'),
+                                  (base, 'https://api.example.com/v1/'),
+                                  (model, 'my-model')):
+                widget.delete(0, 'end')
+                widget.insert(0, value)
+            button(dialog, '确认').invoke()
+
+        root.after(200, fill)
+        self.assertEqual(translator.show_settings_dialog(root),
+                         {'api_key': 'sk-test-only', 'base_url': 'https://api.example.com/v1',
+                          'model': 'my-model'})
+
     def test_glass_style_and_api_key_share_the_config(self):
         self.addCleanup(translator.set_glass_style, translator.get_glass_style())
         translator.save_api_key('example.test-only')
@@ -145,6 +189,33 @@ class TranslationTests(unittest.TestCase):
         translator.translate('\u4f60\u597d')
         prompt = self.post.call_args.kwargs['json']['messages'][0]['content']
         self.assertIn('\u4e2d\u6587\u7ffb\u8bd1\u6210\u82f1\u6587', prompt)
+
+    def test_custom_endpoint_and_model(self):
+        with patch.multiple(translator, API_BASE_URL='https://api.example.com/v1/',
+                            API_MODEL='my-model'):
+            translator.translate('Hello')
+        args, kwargs = self.post.call_args
+        self.assertEqual(args[0], 'https://api.example.com/v1/chat/completions')
+        self.assertEqual(kwargs['json']['model'], 'my-model')
+
+    def test_full_endpoint_url_is_used_as_is(self):
+        url = 'https://api.example.com/openai/chat/completions'
+        self.assertEqual(translator.chat_completions_url(url), url)
+        self.assertEqual(translator.chat_completions_url(''),
+                         translator.DEFAULT_BASE_URL + '/chat/completions')
+
+    def test_settings_validation(self):
+        validate = translator.validate_api_settings
+        self.assertEqual(validate('', '', '')[0], None)
+        self.assertEqual(validate('nodot-key-123', '', '')[0], None)
+        self.assertEqual(validate('sk-abc', 'ftp://x', '')[0], None)
+        self.assertEqual(
+            validate(' sk-abc ', 'https://api.deepseek.com/', 'deepseek-chat')[0],
+            {'api_key': 'sk-abc', 'base_url': 'https://api.deepseek.com',
+             'model': 'deepseek-chat'})
+        self.assertEqual(
+            validate('example.test-only', translator.DEFAULT_BASE_URL, translator.MODEL)[0],
+            {'api_key': 'example.test-only', 'base_url': '', 'model': ''})
 
     def test_network_failure(self):
         self.post.side_effect = translator.requests.Timeout('test timeout')

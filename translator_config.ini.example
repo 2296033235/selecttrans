@@ -1,2 +1,6 @@
 [settings]
 api_key =
+# 留空使用默认的智谱 GLM；可改成任何 OpenAI 兼容接口，例如 https://api.deepseek.com
+base_url =
+# 留空使用默认模型 glm-4-flash-250414
+model =

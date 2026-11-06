@@ -30,6 +30,7 @@ from pynput import mouse as pynmouse
 # ── 常量 ─────────────────────────────────────────────────────
 
 MODEL                 = "glm-4-flash-250414"
+DEFAULT_BASE_URL      = "https://open.bigmodel.cn/api/paas/v4"   # OpenAI 兼容接口
 DOUBLE_CLICK_INTERVAL = 0.4
 STARTUP_NAME          = "Translator"
 
@@ -91,8 +92,23 @@ def _write_config(cfg: configparser.ConfigParser):
         cfg.write(f)
 
 
+def load_api_settings() -> dict:
+    """api_key, base_url and model; empty base_url / model mean the defaults."""
+    cfg = _read_config()
+    return {key: cfg.get('settings', key, fallback='').strip()
+            for key in ('api_key', 'base_url', 'model')}
+
+
+def save_api_settings(api_key: str, base_url: str = '', model: str = ''):
+    cfg = _read_config()
+    if not cfg.has_section('settings'):
+        cfg.add_section('settings')
+    cfg['settings'].update(api_key=api_key, base_url=base_url, model=model)
+    _write_config(cfg)
+
+
 def load_api_key() -> str:
-    return _read_config().get('settings', 'api_key', fallback='').strip()
+    return load_api_settings()['api_key']
 
 
 def save_api_key(key: str):
@@ -223,13 +239,13 @@ def _make_icon() -> Image.Image:
 
 
 def setup_tray(root: tk.Tk) -> pystray.Icon:
-    def on_change_key(icon, item):
+    def on_settings(icon, item):
         def _do():
-            global API_KEY
-            key = show_key_dialog(root, current_key=API_KEY)
-            if key:
-                save_api_key(key)
-                API_KEY = key
+            settings = show_settings_dialog(root, current_api_settings())
+            if settings:
+                save_api_settings(**settings)
+                apply_api_settings(settings)
+                icon.update_menu()
         root.after(0, _do)
 
     def on_style(icon, item):
@@ -244,8 +260,9 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
 
     menu = pystray.Menu(
         pystray.MenuItem('翻译工具', None, enabled=False),
+        pystray.MenuItem(lambda item: f'模型：{API_MODEL or MODEL}', None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('修改 API Key', on_change_key),
+        pystray.MenuItem('接口设置（API Key / 模型）', on_settings),
         pystray.MenuItem('外观设置', on_style),
         pystray.MenuItem('开机自启', on_toggle_startup,
                          checked=lambda item: is_startup_enabled()),
@@ -260,7 +277,30 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
 
 # ── 首次设置 / 修改 Key 弹窗 ──────────────────────────────────
 
-def show_key_dialog(root: tk.Tk, current_key: str = '') -> str | None:
+def validate_api_settings(api_key: str, base_url: str, model: str) -> tuple[dict | None, str]:
+    """Normalize the dialog input; returns (settings, '') or (None, error message).
+
+    Values equal to the defaults are stored empty so a later change of the
+    default endpoint or model reaches users who never customized them.
+    """
+    api_key, base_url, model = api_key.strip(), base_url.strip().rstrip('/'), model.strip()
+    if not api_key:
+        return None, "API Key 不能为空"
+    if base_url and not re.match(r'https?://[^\s/]+', base_url):
+        return None, "接口地址需以 http:// 或 https:// 开头"
+    if base_url == DEFAULT_BASE_URL:
+        base_url = ''
+    if model == MODEL:
+        model = ''
+    # 智谱的 Key 形如 id.secret；其他服务商格式各不相同，不做检查。
+    if not base_url and ('.' not in api_key or len(api_key) < 10):
+        return None, "Key 格式不正确，请检查（智谱 Key 形如 xxx.xxx）"
+    return {'api_key': api_key, 'base_url': base_url, 'model': model}, ''
+
+
+def show_settings_dialog(root: tk.Tk, current: dict | None = None) -> dict | None:
+    """API Key plus optional base URL and model; returns the new settings or None."""
+    current = current or {}
     dialog = tk.Toplevel(root)
     dialog.title("翻译工具 - 设置")
     dialog.resizable(False, False)
@@ -268,13 +308,15 @@ def show_key_dialog(root: tk.Tk, current_key: str = '') -> str | None:
     dialog.configure(bg=BG)
     dialog.grab_set()
     pad = 24
+    entry_style = dict(bg='#1a1a1a', fg='#f0f0f0', insertbackground='#ffffff',
+                       relief='flat', font=('Consolas', 10), width=44)
 
     tk.Label(dialog, text="翻译工具设置",
              bg=BG, fg='#ffffff', font=('Segoe UI', 13, 'bold')
              ).pack(padx=pad, pady=(pad, 4), anchor='w')
 
     tk.Label(dialog,
-             text="请输入您的 GLM API Key\n免费申请地址：bigmodel.cn  →  API Keys",
+             text="请输入您的 API Key\n默认使用智谱 GLM，免费申请：bigmodel.cn  →  API Keys",
              bg=BG, fg='#888888', font=('Segoe UI', 9), justify='left'
              ).pack(padx=pad, anchor='w')
 
@@ -286,10 +328,8 @@ def show_key_dialog(root: tk.Tk, current_key: str = '') -> str | None:
     tk.Label(f, text="API Key", bg=BG2, fg='#aaaaaa',
              font=('Segoe UI', 9)).pack(anchor='w')
 
-    entry_var = tk.StringVar(value=current_key)
-    entry = tk.Entry(f, textvariable=entry_var,
-                     bg='#1a1a1a', fg='#f0f0f0', insertbackground='#ffffff',
-                     relief='flat', font=('Consolas', 10), width=44, show='*')
+    entry_var = tk.StringVar(value=current.get('api_key', ''))
+    entry = tk.Entry(f, textvariable=entry_var, show='*', **entry_style)
     entry.pack(fill='x', pady=(4, 0), ipady=6)
 
     show_var = tk.BooleanVar()
@@ -299,23 +339,100 @@ def show_key_dialog(root: tk.Tk, current_key: str = '') -> str | None:
                    activebackground=BG2, font=('Segoe UI', 8), borderwidth=0
                    ).pack(anchor='w', pady=(4, 0))
 
+    # ── 更多设置：自定义接口地址和模型 ──
+    toggle = tk.Button(dialog, bg=BG, fg='#8ab4f8', activebackground=BG,
+                       activeforeground='#aecbfa', relief='flat', borderwidth=0,
+                       font=('Segoe UI', 9), cursor='hand2', anchor='w')
+    toggle.pack(padx=pad, pady=(10, 0), anchor='w')
+
+    more = tk.Frame(dialog, bg=BG2, padx=12, pady=10)
+    base_var = tk.StringVar(value=current.get('base_url') or DEFAULT_BASE_URL)
+    model_var = tk.StringVar(value=current.get('model') or MODEL)
+    for label, var in (("接口地址（Base URL）", base_var), ("模型", model_var)):
+        tk.Label(more, text=label, bg=BG2, fg='#aaaaaa',
+                 font=('Segoe UI', 9)).pack(anchor='w', pady=(0 if var is base_var else 8, 0))
+        tk.Entry(more, textvariable=var, **entry_style).pack(fill='x', pady=(4, 0), ipady=6)
+    tk.Label(more,
+             text="支持 OpenAI 兼容接口，例如 https://api.deepseek.com、\n"
+                  "https://api.openai.com/v1，会自动补上 /chat/completions。",
+             bg=BG2, fg='#666666', font=('Segoe UI', 8), justify='left'
+             ).pack(anchor='w', pady=(6, 0))
+    more_buttons = tk.Frame(more, bg=BG2)
+    more_buttons.pack(fill='x', pady=(8, 0))
+    test_lbl = tk.Label(more, text="", bg=BG2, fg='#888888', font=('Segoe UI', 9),
+                        justify='left', wraplength=380)
+    test_lbl.pack(anchor='w', pady=(6, 0))
+
+    def reset_endpoint():
+        base_var.set(DEFAULT_BASE_URL)
+        model_var.set(MODEL)
+        test_lbl.config(text="")
+
+    def run_test():
+        settings, error = validate_api_settings(entry_var.get(), base_var.get(),
+                                                model_var.get())
+        if not settings:
+            test_lbl.config(text=error, fg='#ff6b6b')
+            return
+        test_lbl.config(text="正在测试…", fg='#888888')
+        test_btn.config(state='disabled')
+        outcome = {}
+
+        def work():
+            try:
+                outcome['text'] = request_translation('Hello', settings['api_key'],
+                                                      settings['base_url'], settings['model'])
+            except Exception as e:
+                outcome['error'] = str(e)
+
+        def wait():
+            if not dialog.winfo_exists():
+                return
+            if not outcome:
+                dialog.after(100, wait)
+                return
+            test_btn.config(state='normal')
+            if 'error' in outcome:
+                test_lbl.config(text=f"连接失败：{outcome['error'][:200]}", fg='#ff6b6b')
+            else:
+                test_lbl.config(text=f"连接成功：Hello → {outcome['text'][:60]}",
+                                fg='#7bd88f')
+
+        threading.Thread(target=work, daemon=True).start()
+        dialog.after(100, wait)
+
+    small = dict(bg='#333333', fg='#bbbbbb', activebackground='#3a3a3a',
+                 relief='flat', font=('Segoe UI', 9), padx=10, pady=3, cursor='hand2')
+    test_btn = tk.Button(more_buttons, text="测试连接", command=run_test, **small)
+    test_btn.pack(side='left')
+    tk.Button(more_buttons, text="恢复默认", command=reset_endpoint, **small
+              ).pack(side='left', padx=(8, 0))
+
+    def set_expanded(expanded: bool):
+        if expanded:
+            more.pack(fill='x', padx=pad, pady=(6, 0), after=toggle)
+        else:
+            more.pack_forget()
+        toggle.config(text=("▾ 更多设置（接口地址、模型）" if expanded
+                            else "▸ 更多设置（接口地址、模型）"),
+                      command=lambda: set_expanded(not expanded))
+
     err_lbl = tk.Label(dialog, text="", bg=BG, fg='#ff6b6b', font=('Segoe UI', 9))
     err_lbl.pack(padx=pad, anchor='w')
+    set_expanded(bool(current.get('base_url') or current.get('model')))
 
     btn_frame = tk.Frame(dialog, bg=BG)
     btn_frame.pack(fill='x', padx=pad, pady=(4, pad))
 
-    result = {'key': None}
+    result = {'settings': None}
 
     def on_confirm():
-        key = entry_var.get().strip()
-        if not key:
-            err_lbl.config(text="API Key 不能为空")
+        settings, error = validate_api_settings(entry_var.get(), base_var.get(),
+                                                model_var.get())
+        if not settings:
+            err_lbl.config(text=error)
             return
-        if '.' not in key or len(key) < 10:
-            err_lbl.config(text="Key 格式不正确，请检查")
-            return
-        result['key'] = key
+        result['settings'] = settings
         dialog.destroy()
 
     tk.Button(btn_frame, text="取消",
@@ -339,12 +456,31 @@ def show_key_dialog(root: tk.Tk, current_key: str = '') -> str | None:
     dialog.geometry(f'+{(sw-w)//2}+{(sh-h)//2}')
     entry.focus_set()
     dialog.wait_window()
-    return result['key']
+    return result['settings']
 
 
 # ── 翻译 ─────────────────────────────────────────────────────
 
 API_KEY = ''
+API_BASE_URL = ''     # 空字符串表示 DEFAULT_BASE_URL
+API_MODEL = ''        # 空字符串表示 MODEL
+
+
+def apply_api_settings(settings: dict):
+    global API_KEY, API_BASE_URL, API_MODEL
+    API_KEY = settings.get('api_key', '')
+    API_BASE_URL = settings.get('base_url', '')
+    API_MODEL = settings.get('model', '')
+
+
+def current_api_settings() -> dict:
+    return {'api_key': API_KEY, 'base_url': API_BASE_URL, 'model': API_MODEL}
+
+
+def chat_completions_url(base_url: str = '') -> str:
+    """Accept either a base such as https://api.openai.com/v1 or the full endpoint."""
+    base = (base_url.strip() or DEFAULT_BASE_URL).rstrip('/')
+    return base if base.endswith('/chat/completions') else base + '/chat/completions'
 
 
 def detect_lang(text: str) -> str:
@@ -354,21 +490,26 @@ def detect_lang(text: str) -> str:
     return 'en'
 
 
-def translate(text: str) -> str:
+def request_translation(text: str, api_key: str, base_url: str = '',
+                        model: str = '') -> str:
     prompt = (f"请将以下中文翻译成英文，只输出翻译结果：\n{text}"
               if detect_lang(text) == 'zh' else
               f"请将以下英文翻译成中文，只输出翻译结果：\n{text}")
+    r = requests.post(
+        chat_completions_url(base_url),
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": model.strip() or MODEL,
+              "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": 512, "temperature": 0.3},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def translate(text: str) -> str:
     try:
-        r = requests.post(
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={"model": MODEL,
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 512, "temperature": 0.3},
-            timeout=30,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        return request_translation(text, API_KEY, API_BASE_URL, API_MODEL)
     except Exception as e:
         return f"[Error: {e}]"
 
@@ -1865,22 +2006,20 @@ def open_style_editor(root: tk.Tk, on_close=None) -> tk.Toplevel:
 # ── 入口 ─────────────────────────────────────────────────────
 
 def main():
-    global API_KEY
-
     enable_dpi_awareness()
     root = tk.Tk()
     root.withdraw()
 
     is_first_run = not os.path.exists(CONFIG_FILE)
 
-    API_KEY = load_api_key()
+    apply_api_settings(load_api_settings())
     while not API_KEY:
-        key = show_key_dialog(root)
-        if key is None:
+        settings = show_settings_dialog(root, current_api_settings())
+        if settings is None:
             root.destroy()
             return
-        save_api_key(key)
-        API_KEY = key
+        save_api_settings(**settings)
+        apply_api_settings(settings)
     load_glass_style()
 
     # 首次运行时自动开机自启（仅 exe 模式）

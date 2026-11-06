@@ -10,7 +10,8 @@ A lightweight Windows selection translator, activated by a double tap of Ctrl.
 - 中译英、英译中，悬浮窗显示原文和译文，一键复制整段译文。
 - 悬浮窗采用透明液态玻璃风格：背后的画面轻微模糊后透出来，边缘有折射和高光描边，文字按背景深浅自动变色。颜色、透明度、模糊等都能在“外观设置”里自己调。
 - 点击朗读按钮收听原文。
-- 系统托盘菜单支持修改 API Key、外观设置、管理开机自启和退出程序。
+- 默认使用智谱 GLM，也可以在“更多设置”里换成任何 OpenAI 兼容接口（自定义接口地址、API Key 和模型）。
+- 系统托盘菜单支持接口设置（API Key / 接口地址 / 模型）、外观设置、管理开机自启和退出程序。
 - Python 源码开放，可自行修改提示词、模型、快捷键参数和界面。
 
 ## 环境要求
@@ -57,14 +58,16 @@ py -3 -m venv .venv
 
 右键托盘图标选择“外观设置”可以调整悬浮窗样式：先点一个预设（清透 / 磨砂 / 深色），再按需拖动滑块、点色块选颜色，旁边的预览框会实时变化。点“保存”后写入 `translator_config.ini` 的 `[glass]` 部分，下次启动仍然有效；点“取消”或关闭窗口则恢复打开前的样式。源码模式下也可以双击 `tools\glass_tuner.bat`，在几种测试背景上对比效果。
 
-API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常由首次设置窗口自动创建；需要手动配置时，可以复制 `translator_config.ini.example`，重命名为 `translator_config.ini`，再填写 `api_key`。设置窗口和托盘菜单都支持修改密钥。
+API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常由首次设置窗口自动创建；需要手动配置时，可以复制 `translator_config.ini.example`，重命名为 `translator_config.ini`，再填写 `api_key`。右键托盘图标选择“接口设置（API Key / 模型）”可以随时修改。
+
+想换用其他模型或服务商时，在设置窗口点开“更多设置”，填写接口地址和模型名，例如 DeepSeek 填 `https://api.deepseek.com` 和 `deepseek-chat`，OpenAI 填 `https://api.openai.com/v1` 和对应模型名，API Key 填该服务商的密钥。接口地址可以只写到版本号，程序会自动补上 `/chat/completions`；也可以直接填完整地址。点“测试连接”会用 `Hello` 试翻译一次，确认能用再保存。点“恢复默认”回到智谱 GLM 的地址和 `glm-4-flash-250414`。这两项保持默认时，配置文件里会留空，以后默认值更新也会自动生效。
 
 开机自启可通过托盘菜单管理。源码模式也可运行 `add_startup.bat` 开启，或运行 `remove_startup.bat` 关闭。当前 EXE 沿用原有行为：首次成功配置密钥后自动启用开机自启，可在托盘菜单取消。启动项位于当前用户注册表的 `Software\Microsoft\Windows\CurrentVersion\Run`，值名为 `Translator`。不要同时启用多个副本；迁移旧版本时，先关闭旧启动项。
 
 ## 隐私与安全
 
 - API Key 以**明文**保存在本地 INI 文件，不是加密凭据存储。不要共享该文件，不要把已配置的整个运行目录打包发送给别人。
-- 翻译时，选中的文本会发送到智谱 BigModel；点击朗读时，原文会通过 edge-tts 发送到 Microsoft Edge 在线语音服务。不要使用本工具处理未经授权发送到第三方的敏感内容。
+- 翻译时，选中的文本会发送到智谱 BigModel（或你在“更多设置”里填写的接口地址）；点击朗读时，原文会通过 edge-tts 发送到 Microsoft Edge 在线语音服务。不要使用本工具处理未经授权发送到第三方的敏感内容。
 - 获取选中文字依赖模拟 `Ctrl+C`，会临时清空和使用剪贴板，并尝试恢复之前的文本。图片、富文本和其他非文本剪贴板内容不保证恢复。
 - 玻璃效果需要看到悬浮窗背后的画面：悬浮窗显示期间，程序会截取它背后那一小块屏幕（约每 0.6 秒一次，拖动时更频繁），只在内存中用来绘制玻璃，不保存、不上传。截取的一瞬间悬浮窗会把自己排除在屏幕截图之外，录屏或共享屏幕时它可能偶尔闪一下。
 - 程序通过全局键盘监听识别快捷键。源码中的监听回调仅用于 Ctrl 手势判断，不实现键盘日志功能。
@@ -77,16 +80,16 @@ API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常
 
 | 位置 | 可修改内容 |
 | --- | --- |
-| `MODEL` | 默认使用的智谱模型 ID |
+| `MODEL` / `DEFAULT_BASE_URL` | 默认的模型 ID 和接口地址（用户可在“更多设置”里覆盖） |
 | `DOUBLE_CLICK_INTERVAL` / `MAX_HOLD` | 双击时间间隔和长按过滤阈值 |
-| `translate()` | API 地址、提示词、输出长度和请求参数 |
+| `request_translation()` | 提示词、输出长度和请求参数 |
 | `detect_lang()` | 语言判断规则 |
 | `speak_text()` | 朗读声音 |
 | `PopupManager` / 颜色常量 | 悬浮窗布局、颜色与交互 |
 | `GLASS_*` 常量 / `GLASS_PRESETS` | 玻璃的默认样式和预设；用户在“外观设置”里保存的值会覆盖默认值 |
 | `render_glass_background()` / `render_glass_popup()` | 玻璃的绘制方式：模糊、饱和度、边缘折射、高光和文字 |
 
-换用其他服务商时，还需要调整接口地址、鉴权和请求/响应格式；仅修改模型名称并不能保证兼容。
+“更多设置”只支持 OpenAI 兼容的 Chat Completions 接口（`Authorization: Bearer` 鉴权，返回 `choices[0].message.content`）。其他格式的服务商需要修改 `request_translation()` 的鉴权和请求/响应格式。
 
 安装依赖后可在 Windows 上运行不访问真实翻译接口的单元测试：
 
