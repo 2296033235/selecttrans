@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -144,6 +145,141 @@ class ShortcutTests(unittest.TestCase):
             translator.on_key_release(translator.pynkb.Key.ctrl_l)
         self.assertFalse(translator._ctrl_pressed)
         self.thread.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
+class PopupTests(unittest.TestCase):
+    def test_mouse_drag_bounds_are_used_before_ui_automation(self):
+        tracker = translator.MouseSelectionTracker()
+        with patch.object(translator.time, 'monotonic', return_value=100.0), \
+             patch.object(translator, 'get_foreground_window', return_value=42):
+            tracker.on_click(650, 250, translator.pynmouse.Button.left, True)
+            tracker.on_click(110, 165, translator.pynmouse.Button.left, False)
+            with patch.object(translator, 'get_selection_bounds') as uia:
+                self.assertEqual(translator.resolve_selection_bounds(tracker),
+                                 (110, 165, 650, 250))
+                uia.assert_not_called()
+
+    def test_mouse_drag_is_discarded_after_other_click_or_window_change(self):
+        tracker = translator.MouseSelectionTracker()
+        with patch.object(translator.time, 'monotonic', return_value=100.0), \
+             patch.object(translator, 'get_foreground_window', return_value=42):
+            tracker.on_click(110, 165, translator.pynmouse.Button.left, True)
+            tracker.on_click(650, 250, translator.pynmouse.Button.left, False)
+        self.assertIsNone(tracker.get_bounds(100.1, 43))
+        with patch.object(translator.time, 'monotonic', return_value=101.0), \
+             patch.object(translator, 'get_foreground_window', return_value=42):
+            tracker.on_click(110, 165, translator.pynmouse.Button.left, True)
+            tracker.on_click(650, 250, translator.pynmouse.Button.left, False)
+            tracker.on_click(700, 400, translator.pynmouse.Button.left, True)
+            tracker.on_click(700, 400, translator.pynmouse.Button.left, False)
+        self.assertIsNone(tracker.get_bounds(101.1, 42))
+
+    def test_keyboard_selection_uses_ui_automation_when_no_mouse_drag(self):
+        tracker = translator.MouseSelectionTracker()
+        with patch.object(translator, 'get_selection_bounds',
+                          return_value=(50, 100, 300, 140)) as uia:
+            self.assertEqual(translator.resolve_selection_bounds(tracker),
+                             (50, 100, 300, 140))
+            uia.assert_called_once_with()
+
+    def test_selection_bounds_cover_every_selected_line(self):
+        selected = Mock()
+        selected.GetText.return_value = 'x'
+        selected.GetBoundingRectangles.return_value = [
+            SimpleNamespace(left=50, top=110, right=239, bottom=142),
+            SimpleNamespace(left=90, top=270, right=503, bottom=366),
+        ]
+        control = Mock()
+        control.GetPattern.return_value.GetSelection.return_value = [selected]
+        with patch('uiautomation.GetFocusedControl', return_value=control):
+            self.assertEqual(translator.get_selection_bounds(), (50, 110, 503, 366))
+
+    def test_selection_bounds_use_visible_range_when_text_is_unavailable(self):
+        selected = Mock()
+        selected.GetText.return_value = ''
+        selected.GetBoundingRectangles.return_value = [
+            SimpleNamespace(left=70, top=160, right=600, bottom=188),
+        ]
+        control = Mock()
+        control.GetPattern.return_value.GetSelection.return_value = [selected]
+        with patch('uiautomation.GetFocusedControl', return_value=control):
+            self.assertEqual(translator.get_selection_bounds(), (70, 160, 600, 188))
+
+    def test_selection_bounds_find_text_pattern_on_parent_document(self):
+        selected = Mock()
+        selected.GetBoundingRectangles.return_value = [
+            SimpleNamespace(left=76, top=165, right=1100, bottom=251),
+        ]
+        document = Mock()
+        document.ControlTypeName = 'DocumentControl'
+        document.GetPattern.return_value.GetSelection.return_value = [selected]
+        outer_group = Mock()
+        outer_group.ControlTypeName = 'GroupControl'
+        outer_group.GetPattern.return_value = None
+        outer_group.GetParentControl.return_value = document
+        focused_group = Mock()
+        focused_group.ControlTypeName = 'GroupControl'
+        focused_group.GetPattern.return_value = None
+        focused_group.GetParentControl.return_value = outer_group
+        with patch('uiautomation.GetFocusedControl', return_value=focused_group):
+            self.assertEqual(translator.get_selection_bounds(), (76, 165, 1100, 251))
+
+    def test_selection_diagnostics_record_missing_text_pattern(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / 'selection.log'
+            control = Mock()
+            control.ControlTypeName = 'DocumentControl'
+            control.GetPattern.return_value = None
+            control.GetParentControl.return_value = None
+            with patch.dict(os.environ, {
+                'TRANSLATOR_SELECTION_DIAGNOSTICS': str(log_path),
+            }), patch('uiautomation.GetFocusedControl', return_value=control):
+                self.assertIsNone(translator.get_selection_bounds())
+            self.assertIn('no_text_pattern_or_selection',
+                          log_path.read_text(encoding='utf-8'))
+
+    def test_popup_position_is_below_right_of_selection(self):
+        self.assertEqual(
+            translator.choose_popup_position((50, 110, 503, 366), 370, 300,
+                                             (0, 0, 2048, 1112)),
+            (515, 378),
+        )
+
+    def test_popup_position_flips_at_screen_edges(self):
+        self.assertEqual(
+            translator.choose_popup_position((1700, 900, 1950, 1050), 370, 300,
+                                             (0, 0, 2048, 1112)),
+            (1318, 588),
+        )
+
+    def test_popup_repositions_after_translation_expands(self):
+        root = translator.tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        manager = translator.PopupManager(root)
+        with patch.object(translator, 'get_work_area', return_value=(0, 0, 1000, 700)):
+            manager._show('original', '翻译中…', 0, 0,
+                          selection_bounds=(50, 500, 300, 520))
+            popup = manager.popup
+            self.assertEqual((popup.winfo_rootx(), popup.winfo_rooty()),
+                             (312, 532))
+
+            manager._set_result('translated line\n' * 10)
+            popup.update_idletasks()
+            self.assertEqual(popup.winfo_rootx(), 312)
+            self.assertLess(popup.winfo_rooty() + popup.winfo_height(), 500)
+
+    def test_popup_without_selection_bounds_stays_near_mouse(self):
+        root = translator.tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        manager = translator.PopupManager(root)
+        with patch.object(translator, 'get_work_area', return_value=(0, 0, 2048, 1112)):
+            manager._show('original', '翻译中…', 570, 263)
+            popup = manager.popup
+            self.assertEqual((popup.winfo_rootx(), popup.winfo_rooty()),
+                             (582, 275))
 
 
 if __name__ == '__main__':

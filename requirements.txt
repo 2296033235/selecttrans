@@ -5,3 +5,4 @@ pystray==0.19.5
 Pillow==13.0.0
 pywin32==312
 edge-tts==7.3.1
+uiautomation==2.0.29

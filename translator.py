@@ -305,6 +305,159 @@ def get_mouse_pos() -> tuple[int, int]:
     return pt.x, pt.y
 
 
+def get_foreground_window() -> int:
+    return ctypes.windll.user32.GetForegroundWindow()
+
+
+class MouseSelectionTracker:
+    """Remember a recent left-button drag without reading selected text."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._start: tuple[int, int] | None = None
+        self._bounds: tuple[int, int, int, int] | None = None
+        self._window = 0
+        self._finished_at = 0.0
+
+    def clear(self):
+        with self._lock:
+            self._start = None
+            self._bounds = None
+
+    def on_click(self, x, y, button, pressed):
+        if button != pynmouse.Button.left:
+            return
+        with self._lock:
+            if pressed:
+                self._start = (x, y)
+                self._bounds = None
+                return
+            start = self._start
+            self._start = None
+            if not start or max(abs(x - start[0]), abs(y - start[1])) < 4:
+                self._bounds = None
+                return
+            self._bounds = (min(start[0], x), min(start[1], y),
+                            max(start[0], x), max(start[1], y))
+            self._window = get_foreground_window()
+            self._finished_at = time.monotonic()
+
+    def on_scroll(self, x, y, dx, dy):
+        self.clear()
+
+    def get_bounds(self, now: float, window: int) -> tuple[int, int, int, int] | None:
+        with self._lock:
+            if (self._bounds and self._window == window
+                    and 0 <= now - self._finished_at <= 60):
+                return self._bounds
+            return None
+
+
+_mouse_selection = MouseSelectionTracker()
+
+
+def resolve_selection_bounds(
+    tracker: MouseSelectionTracker = _mouse_selection,
+) -> tuple[int, int, int, int] | None:
+    bounds = tracker.get_bounds(time.monotonic(), get_foreground_window())
+    if bounds:
+        _selection_diagnostic('mouse_drag_bounds', f'bounds={bounds}')
+        return bounds
+    return get_selection_bounds()
+
+
+def _selection_diagnostic(status: str, detail: str = ''):
+    path = os.environ.get('TRANSLATOR_SELECTION_DIAGNOSTICS')
+    if not path:
+        return
+    try:
+        with open(path, 'a', encoding='utf-8') as log:
+            log.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} '
+                      f'{status} {detail}\n')
+    except OSError:
+        pass
+
+
+def get_selection_bounds() -> tuple[int, int, int, int] | None:
+    """Return the visible selected text bounds from Windows UI Automation."""
+    try:
+        import comtypes
+        comtypes.CoInitialize()
+        try:
+            import uiautomation as auto
+            control = auto.GetFocusedControl()
+            if not control:
+                _selection_diagnostic('no_focused_control')
+                return None
+            for depth in range(6):
+                pattern = control.GetPattern(auto.PatternId.TextPattern)
+                if pattern:
+                    selection = pattern.GetSelection()
+                    rectangles = [
+                        rect
+                        for selected in selection
+                        for rect in selected.GetBoundingRectangles()
+                        if rect.right - rect.left > 1 and rect.bottom > rect.top
+                    ]
+                    if rectangles:
+                        bounds = (min(rect.left for rect in rectangles),
+                                  min(rect.top for rect in rectangles),
+                                  max(rect.right for rect in rectangles),
+                                  max(rect.bottom for rect in rectangles))
+                        _selection_diagnostic('bounds_found',
+                                              f'control={control.ControlTypeName} '
+                                              f'depth={depth} ranges={len(selection)} '
+                                              f'rects={len(rectangles)} bounds={bounds}')
+                        return bounds
+                    _selection_diagnostic('no_valid_rectangles',
+                                          f'control={control.ControlTypeName} '
+                                          f'depth={depth} ranges={len(selection)}')
+                parent = control.GetParentControl()
+                if not parent:
+                    break
+                control = parent
+            _selection_diagnostic('no_text_pattern_or_selection')
+            return None
+        finally:
+            comtypes.CoUninitialize()
+    except Exception as error:
+        _selection_diagnostic('uia_error', type(error).__name__)
+        return None
+
+
+def get_work_area(x: int, y: int) -> tuple[int, int, int, int]:
+    import win32api
+    import win32con
+    monitor = win32api.MonitorFromPoint((x, y), win32con.MONITOR_DEFAULTTONEAREST)
+    return win32api.GetMonitorInfo(monitor)['Work']
+
+
+def choose_popup_position(
+    bounds: tuple[int, int, int, int], width: int, height: int,
+    work_area: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    left, top, right, bottom = bounds
+    work_left, work_top, work_right, work_bottom = work_area
+    min_x, min_y = work_left + 8, work_top + 8
+    max_x = max(min_x, work_right - width - 8)
+    max_y = max(min_y, work_bottom - height - 8)
+
+    if right + 12 <= max_x:
+        px = right + 12
+    elif left - width - 12 >= min_x:
+        px = left - width - 12
+    else:
+        px = min(max(right + 12, min_x), max_x)
+
+    if bottom + 12 <= max_y:
+        py = bottom + 12
+    elif top - height - 12 >= min_y:
+        py = top - height - 12
+    else:
+        py = min(max(bottom + 12, min_y), max_y)
+    return px, py
+
+
 def send_ctrl_c():
     global _simulating
     _simulating = True
@@ -338,6 +491,7 @@ _other_key_in_ctrl   = False   # Ctrl 按住期间是否按了其他键
 
 def translation_worker():
     mx, my = get_mouse_pos()
+    selection_bounds = resolve_selection_bounds()
     try:
         old_clip = pyperclip.paste()
     except Exception:
@@ -352,7 +506,7 @@ def translation_worker():
         pass
     if not text:
         return
-    _ui_queue.put(('show', text, '翻译中…', mx, my))
+    _ui_queue.put(('show', text, '翻译中…', mx, my, selection_bounds))
     _ui_queue.put(('update', translate(text)))
 
 
@@ -369,6 +523,7 @@ def on_key_press(key):
             _ctrl_press_time   = time.time()
             _other_key_in_ctrl = False
     else:
+        _mouse_selection.clear()
         if _ctrl_pressed:              # Ctrl 按住时又按了其他键（如 C、V）
             _other_key_in_ctrl = True
 
@@ -410,6 +565,9 @@ class PopupManager:
         self._translation: str = ''       # 缓存翻译结果，供复制使用
         self._original: str = ''          # 缓存原文，供朗读使用
         self._mouse_listener = None
+        self._popup_anchor = (0, 0)
+        self._selection_bounds = None
+        self._popup_dragged = False
         self._poll()
 
     def _poll(self):
@@ -417,8 +575,8 @@ class PopupManager:
             while True:
                 msg = _ui_queue.get_nowait()
                 if msg[0] == 'show':
-                    _, text, placeholder, x, y = msg
-                    self._show(text, placeholder, x, y)
+                    _, text, placeholder, x, y, selection_bounds = msg
+                    self._show(text, placeholder, x, y, selection_bounds)
                 elif msg[0] == 'update':
                     if self.result_text and self.popup and self.popup.winfo_exists():
                         self._set_result(msg[1])
@@ -441,12 +599,41 @@ class PopupManager:
             self.copy_btn.config(text='⧉')
         if self.speak_btn and self.popup and self.popup.winfo_exists():
             self.speak_btn.config(state='normal', fg='#888888')
+        if self.popup and self.popup.winfo_exists():
+            self._position_popup()
 
-    def _show(self, text: str, placeholder: str, x: int, y: int):
+    def _position_popup(self):
+        popup = self.popup
+        popup.update_idletasks()
+        pw, ph = popup.winfo_reqwidth(), popup.winfo_reqheight()
+
+        if self._popup_dragged:
+            x, y = popup.winfo_rootx(), popup.winfo_rooty()
+            work_left, work_top, work_right, work_bottom = get_work_area(x, y)
+            px = min(max(x, work_left + 8), max(work_left + 8, work_right - pw - 8))
+            py = min(max(y, work_top + 8), max(work_top + 8, work_bottom - ph - 8))
+        else:
+            x, y = self._popup_anchor
+            if self._selection_bounds:
+                work_area = get_work_area(self._selection_bounds[2],
+                                          self._selection_bounds[3])
+                px, py = choose_popup_position(self._selection_bounds, pw, ph,
+                                               work_area)
+            else:
+                px, py = choose_popup_position((x, y, x, y), pw, ph,
+                                               get_work_area(x, y))
+        popup.geometry(f'+{px}+{py}')
+        popup.update_idletasks()
+
+    def _show(self, text: str, placeholder: str, x: int, y: int,
+              selection_bounds: tuple[int, int, int, int] | None = None):
         if self.popup and self.popup.winfo_exists():
             self.popup.destroy()
 
         self._original = text             # 缓存原文，供朗读使用
+        self._popup_anchor = (x, y)
+        self._selection_bounds = selection_bounds
+        self._popup_dragged = False
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
         popup.attributes('-topmost', True)
@@ -458,9 +645,30 @@ class PopupManager:
 
         # 原文（灰色截断）
         orig = (text[:80] + '…') if len(text) > 80 else text
-        tk.Label(frame, text=orig, bg=BG, fg=FG_ORIG,
-                 font=('Segoe UI', 9), wraplength=340, justify='left'
-                 ).pack(anchor='w')
+        orig_label = tk.Label(frame, text=orig, bg=BG, fg=FG_ORIG,
+                              font=('Segoe UI', 9), wraplength=340,
+                              justify='left', cursor='fleur')
+        orig_label.pack(anchor='w')
+
+        drag_offset = [0, 0]
+
+        def start_drag(event):
+            drag_offset[:] = [event.x_root - popup.winfo_rootx(),
+                              event.y_root - popup.winfo_rooty()]
+
+        def drag_popup(event):
+            self._popup_dragged = True
+            work_left, work_top, work_right, work_bottom = get_work_area(
+                event.x_root, event.y_root)
+            px = min(max(event.x_root - drag_offset[0], work_left + 8),
+                     max(work_left + 8, work_right - popup.winfo_width() - 8))
+            py = min(max(event.y_root - drag_offset[1], work_top + 8),
+                     max(work_top + 8, work_bottom - popup.winfo_height() - 8))
+            popup.geometry(f'+{px}+{py}')
+
+        for widget in (frame, orig_label):
+            widget.bind('<ButtonPress-1>', start_drag)
+            widget.bind('<B1-Motion>', drag_popup)
 
         tk.Frame(frame, bg=FG_SEP, height=1).pack(fill='x', pady=(8, 8))
 
@@ -534,13 +742,9 @@ class PopupManager:
         speak_btn.pack(side='right', padx=(0, 6))
         self.speak_btn = speak_btn
 
-        # 定位（不超出屏幕）
-        popup.update_idletasks()
-        pw = popup.winfo_reqwidth()
-        ph = popup.winfo_reqheight()
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        popup.geometry(f'+{min(x+16, sw-pw-8)}+{min(y+16, sh-ph-8)}')
+        # 靠近选区右下角；拖动原文区域可手动调整位置。
+        self.popup = popup
+        self._position_popup()
 
         popup.update()
         try:
@@ -548,7 +752,6 @@ class PopupManager:
         except Exception:
             pass
 
-        self.popup = popup
         popup.after(300, lambda: self._watch_outside_click(popup))
 
     def _watch_outside_click(self, popup):
@@ -615,6 +818,9 @@ def main():
 
     pynkb.Listener(on_press=on_key_press, on_release=on_key_release,
                    daemon=True).start()
+    pynmouse.Listener(on_click=_mouse_selection.on_click,
+                     on_scroll=_mouse_selection.on_scroll,
+                     daemon=True).start()
     setup_tray(root)
     PopupManager(root)
     root.mainloop()
