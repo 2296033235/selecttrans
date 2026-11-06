@@ -85,25 +85,37 @@ class ConfigTests(unittest.TestCase):
                     yield child
                 yield from widgets(child, kind)
 
-        def button(dialog, text):
-            return next(b for b in widgets(dialog, translator.tk.Button)
-                        if text in b.cget('text'))
-
         def fill():
             dialog = root.winfo_children()[-1]
-            button(dialog, '更多设置').invoke()
+            dialog.actions['confirm']()
+            self.assertTrue(dialog.winfo_exists())       # 空 Key 不能保存
+            dialog.actions['toggle_more']()
             key, base, model = widgets(dialog, translator.tk.Entry)
+            self.assertTrue(base.winfo_ismapped())
             for widget, value in ((key, 'sk-test-only'),
                                   (base, 'https://api.example.com/v1/'),
                                   (model, 'my-model')):
                 widget.delete(0, 'end')
                 widget.insert(0, value)
-            button(dialog, '确认').invoke()
+            dialog.actions['confirm']()
 
         root.after(200, fill)
         self.assertEqual(translator.show_settings_dialog(root),
                          {'api_key': 'sk-test-only', 'base_url': 'https://api.example.com/v1',
                           'model': 'my-model'})
+
+    def test_settings_dialog_cancel_returns_nothing(self):
+        root = make_root(self)
+        root.after(200, lambda: root.winfo_children()[-1].actions['cancel']())
+        self.assertIsNone(translator.show_settings_dialog(root, {'api_key': 'example.test-only'}))
+
+    def test_bundled_crayon_font_is_available(self):
+        self.assertTrue(os.path.exists(translator.CRAYON_FONT_FILE))
+        self.assertEqual(translator.crayon_font_family(), 'ZCOOL KuaiLe')
+        art = translator.CrayonDrawing(120, 80)
+        art.box((10, 10, 110, 50), translator.CRAYON_BLUE, scribble='#c8ecb5')
+        self.assertEqual(art.image.size, (120, 80))
+        self.assertNotEqual(art.image.getpixel((60, 30)), art.image.getpixel((2, 78)))
 
     def test_glass_style_and_api_key_share_the_config(self):
         self.addCleanup(translator.set_glass_style, translator.get_glass_style())

@@ -6,6 +6,7 @@
 import functools
 import math
 import os
+import random
 import re
 import sys
 import time
@@ -23,7 +24,7 @@ import pyperclip
 import pystray
 from ctypes import wintypes
 from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
-                 ImageFont, ImageStat)
+                 ImageFont, ImageStat, ImageTk)
 from pynput import keyboard as pynkb
 from pynput import mouse as pynmouse
 
@@ -298,84 +299,404 @@ def validate_api_settings(api_key: str, base_url: str, model: str) -> tuple[dict
     return {'api_key': api_key, 'base_url': base_url, 'model': model}, ''
 
 
+def resource_path(*parts: str) -> str:
+    """Files bundled next to the script, or inside the PyInstaller archive."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+CRAYON_FONT_FILE = resource_path('assets', 'fonts', 'ZCOOLKuaiLe-Regular.ttf')
+CRAYON_PAPER = '#fffaf0'
+CRAYON_INK = '#34344e'
+CRAYON_MUTED = '#8a8296'
+CRAYON_RED = '#e8503a'
+CRAYON_ORANGE = '#f39a1e'
+CRAYON_YELLOW = '#fcd535'
+CRAYON_GREEN = '#58b84a'
+CRAYON_DARK_GREEN = '#2f8f3a'
+CRAYON_BLUE = '#3a7bd5'
+CRAYON_SKY = '#8fd0f5'
+CRAYON_PINK = '#f48fb1'
+CRAYON_PURPLE = '#8e6bd8'
+CRAYON_TITLE_COLORS = (CRAYON_RED, CRAYON_ORANGE, CRAYON_GREEN, CRAYON_BLUE,
+                       CRAYON_PURPLE, CRAYON_PINK)
+
+
+@functools.lru_cache(maxsize=1)
+def crayon_font_family() -> str:
+    """Register the bundled childlike font for this process; Tk and GDI can then use it."""
+    try:
+        if (os.path.exists(CRAYON_FONT_FILE)
+                and ctypes.windll.gdi32.AddFontResourceExW(CRAYON_FONT_FILE, 0x10, 0)):
+            return 'ZCOOL KuaiLe'                     # 0x10 = FR_PRIVATE
+    except Exception:
+        pass
+    return 'Microsoft YaHei UI'
+
+
+class CrayonDrawing:
+    """Childlike crayon drawing on paper: waxy, wobbly strokes and scribbled fills."""
+
+    def __init__(self, width: int, height: int, scale: float = 1.0, seed: int = 7):
+        self.size = (width, height)
+        self.scale = scale
+        self.rng = random.Random(seed)
+        speck = Image.effect_noise(self.size, 10)
+        self.image = Image.merge('RGB', [
+            ImageChops.add(Image.new('L', self.size, c), speck, offset=-128)
+            for c in _hex_rgb(CRAYON_PAPER)])
+        # 蜡笔在纸上留下的颗粒：随机把一部分笔触“擦掉”。
+        self.grain = Image.effect_noise(self.size, 70).point(
+            [0 if v < 55 else min(255, (v - 55) * 4) for v in range(256)])
+
+    def px(self, value: float) -> float:
+        return value * self.scale
+
+    def mask(self) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+        mask = Image.new('L', self.size, 0)
+        return mask, ImageDraw.Draw(mask)
+
+    def lay(self, mask: Image.Image, color: str, clip: Image.Image | None = None,
+            grain: bool = True):
+        if clip is not None:
+            mask = ImageChops.multiply(mask, clip)
+        if grain:
+            mask = ImageChops.multiply(mask, self.grain)
+        self.image.paste(color, (0, 0, *self.size), mask)
+
+    def _wobble(self, points: list[tuple[float, float]], amount: float
+                ) -> list[tuple[float, float]]:
+        rng = self.rng
+        f1, f2 = rng.uniform(0.15, 0.3), rng.uniform(0.5, 0.9)
+        p1, p2, p3 = (rng.uniform(0, math.tau) for _ in range(3))
+        return [(x + amount * (math.sin(i * f1 + p1) + 0.4 * math.sin(i * f2 + p2)),
+                 y + amount * (math.sin(i * f1 + p3) + 0.4 * math.sin(i * f2 + p1)))
+                for i, (x, y) in enumerate(points)]
+
+    def stroke(self, d: ImageDraw.ImageDraw, points: list[tuple[float, float]],
+               width: float, passes: int = 2, wobble: float = 1.2, alpha: int = 235):
+        for _ in range(passes):
+            pts = self._wobble(points, self.px(wobble))
+            d.line(pts, fill=alpha, width=max(1, round(self.px(width) * self.rng.uniform(0.8, 1.1))),
+                   joint='curve')
+
+    @staticmethod
+    def _resample(points: list[tuple[float, float]], step: float) -> list[tuple[float, float]]:
+        out = [points[0]]
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            n = max(1, round(math.hypot(x1 - x0, y1 - y0) / step))
+            out.extend((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(1, n + 1))
+        return out
+
+    def rounded_path(self, box: tuple, radius: float, overshoot: float = 0.06
+                     ) -> list[tuple[float, float]]:
+        x0, y0, x1, y1 = box
+        r = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
+        corners = [(x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0),
+                   (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)]
+        points = [(x0 + r, y0)]
+        for cx, cy, start in corners:
+            points.extend((cx + r * math.cos(math.radians(start + a)),
+                           cy + r * math.sin(math.radians(start + a))) for a in range(0, 91, 15))
+        points.append((x0 + r, y0))
+        points = self._resample(points, self.px(8))
+        # 小朋友画框常常收不住笔，终点多画出去一点。
+        return points + points[1:max(2, round(len(points) * overshoot))]
+
+    def box(self, box: tuple, color: str, width: float = 2.4, radius: float = 10,
+            fill: str | None = None, scribble: str | None = None):
+        box = tuple(self.px(v) for v in box)
+        shape, sd = self.mask()
+        sd.rounded_rectangle(box, radius=self.px(radius), fill=255)
+        if fill:
+            self.image.paste(fill, (0, 0, *self.size), shape)
+        if scribble:
+            self.scribble(box, scribble, shape)
+        mask, d = self.mask()
+        self.stroke(d, self.rounded_path(box, self.px(radius)), width)
+        self.lay(mask, color)
+
+    def scribble(self, box: tuple, color: str, clip: Image.Image, spacing: float = 5,
+                 width: float = 5):
+        """Back-and-forth coloring strokes, the way children fill a shape."""
+        x0, y0, x1, y1 = box
+        step, slant = self.px(spacing), (y1 - y0) * 0.55
+        points, x, top = [], x0 - slant, True
+        while x < x1 + slant:
+            jitter = self.rng.uniform(-step * 0.3, step * 0.3)
+            points.append((x + slant + jitter, y0 - self.px(3)) if top
+                          else (x + jitter, y1 + self.px(3)))
+            x += step
+            top = not top
+        mask, d = self.mask()
+        self.stroke(d, points, width, passes=1, wobble=0.6, alpha=200)
+        self.lay(mask, color, clip)
+
+    def checkbox(self, x: float, y: float, size: float = 16):
+        self.box((x, y, x + size, y + size), CRAYON_INK, width=2, radius=3, fill='#ffffff')
+
+    def triangle(self, x: float, y: float, size: float, down: bool, color: str):
+        s = size
+        pts = ([(x, y), (x + s, y), (x + s / 2, y + s * 0.8)] if down
+               else [(x, y), (x + s * 0.8, y + s / 2), (x, y + s)])
+        pts = [(self.px(a), self.px(b)) for a, b in pts]
+        shape, sd = self.mask()
+        sd.polygon(pts, fill=255)
+        self.lay(shape, color)
+
+    def sun(self, cx: float, cy: float, r: float):
+        cx, cy, r = self.px(cx), self.px(cy), self.px(r)
+        rays, d = self.mask()
+        for i in range(10):
+            a = i * math.tau / 10 + self.rng.uniform(-0.08, 0.08)
+            inner, outer = r * 1.3, r * self.rng.uniform(1.65, 1.85)
+            self.stroke(d, self._resample([(cx + inner * math.cos(a), cy + inner * math.sin(a)),
+                                           (cx + outer * math.cos(a), cy + outer * math.sin(a))],
+                                          self.px(6)), 3, wobble=0.5)
+        self.lay(rays, CRAYON_ORANGE)
+        shape, sd = self.mask()
+        sd.ellipse((cx - r, cy - r, cx + r, cy + r), fill=255)
+        self.scribble((cx - r, cy - r, cx + r, cy + r), CRAYON_YELLOW, shape, spacing=4, width=5)
+        ring, d = self.mask()
+        self.stroke(d, [(cx + r * math.cos(t / 20 * math.tau), cy + r * math.sin(t / 20 * math.tau))
+                        for t in range(23)], 2.6)
+        self.lay(ring, CRAYON_ORANGE)
+        face, d = self.mask()
+        for ex in (-0.35, 0.35):
+            d.ellipse((cx + ex * r - self.px(2.4), cy - 0.25 * r - self.px(2.4),
+                       cx + ex * r + self.px(2.4), cy - 0.25 * r + self.px(2.4)), fill=255)
+        self.stroke(d, [(cx + 0.45 * r * math.cos(math.radians(a)),
+                         cy + 0.05 * r + 0.4 * r * math.sin(math.radians(a)))
+                        for a in range(20, 161, 20)], 2.2, passes=1, wobble=0.3)
+        self.lay(face, CRAYON_INK)
+        cheeks, d = self.mask()
+        for ex in (-0.6, 0.6):
+            d.ellipse((cx + ex * r - self.px(4), cy + 0.15 * r - self.px(3),
+                       cx + ex * r + self.px(4), cy + 0.15 * r + self.px(3)), fill=170)
+        self.lay(cheeks, CRAYON_PINK)
+
+    def cloud(self, x: float, y: float, w: float):
+        # 几团重叠的圆：(圆心 x, 圆心 y, 半径)，都按云的宽度 w 计算。
+        bumps = [(0.2, 0.32, 0.17), (0.42, 0.22, 0.22), (0.66, 0.27, 0.19), (0.84, 0.36, 0.13)]
+        shape, sd = self.mask()
+        for bx, by, br in bumps:
+            sd.ellipse((self.px(x + (bx - br) * w), self.px(y + (by - br) * w),
+                        self.px(x + (bx + br) * w), self.px(y + (by + br) * w)), fill=255)
+        bbox = shape.getbbox() or (0, 0, 1, 1)
+        self.scribble(bbox, '#e3f3fd', shape, spacing=4, width=5)
+        edge = shape.filter(ImageFilter.FIND_EDGES).point([0 if v < 60 else 255 for v in range(256)])
+        edge = edge.filter(ImageFilter.MaxFilter(3))
+        self.lay(edge, CRAYON_SKY)
+
+    def flower(self, x: float, y: float, ground: float, petal: str, size: float = 9):
+        stem, d = self.mask()
+        self.stroke(d, self._resample([(self.px(x), self.px(ground)),
+                                       (self.px(x + 2), self.px((ground + y) / 2)),
+                                       (self.px(x), self.px(y))], self.px(6)), 2.4, wobble=0.6)
+        self.lay(stem, CRAYON_DARK_GREEN)
+        petals, d = self.mask()
+        for i in range(5):
+            a = i * math.tau / 5 - math.pi / 2
+            px_, py = x + size * 0.8 * math.cos(a), y + size * 0.8 * math.sin(a)
+            r = size * 0.55
+            d.ellipse((self.px(px_ - r), self.px(py - r), self.px(px_ + r), self.px(py + r)), fill=235)
+        self.lay(petals, petal)
+        core, d = self.mask()
+        r = size * 0.42
+        d.ellipse((self.px(x - r), self.px(y - r), self.px(x + r), self.px(y + r)), fill=255)
+        self.lay(core, CRAYON_YELLOW)
+
+    def grass(self, top: float, bottom: float, width: float):
+        shape, sd = self.mask()
+        sd.rectangle((0, self.px(top + 8), self.px(width), self.px(bottom)), fill=255)
+        self.scribble((0, self.px(top + 8), self.px(width), self.px(bottom)), '#b5e3a1',
+                      shape, spacing=5, width=6)
+        blades, d = self.mask()
+        x = 2.0
+        while x < width:
+            h = self.rng.uniform(9, 17)
+            lean = self.rng.uniform(-3, 3)
+            self.stroke(d, [(self.px(x), self.px(top + 12)), (self.px(x + lean), self.px(top + 12 - h))],
+                        2.0, passes=1, wobble=0.3)
+            x += self.rng.uniform(4, 8)
+        self.lay(blades, CRAYON_GREEN)
+
+
 def show_settings_dialog(root: tk.Tk, current: dict | None = None) -> dict | None:
-    """API Key plus optional base URL and model; returns the new settings or None."""
+    """API Key plus optional base URL and model; returns the new settings or None.
+
+    The window is a crayon drawing: Pillow paints the paper, frames and
+    doodles, and the input boxes sit on top of the painted frames.
+    """
     current = current or {}
+    family = crayon_font_family()
     dialog = tk.Toplevel(root)
     dialog.title("翻译工具 - 设置")
     dialog.resizable(False, False)
     dialog.attributes('-topmost', True)
-    dialog.configure(bg=BG)
+    dialog.configure(bg=CRAYON_PAPER)
     dialog.grab_set()
-    pad = 24
-    entry_style = dict(bg='#1a1a1a', fg='#f0f0f0', insertbackground='#ffffff',
-                       relief='flat', font=('Consolas', 10), width=44)
+    scale = ui_scale(dialog)
 
-    tk.Label(dialog, text="翻译工具设置",
-             bg=BG, fg='#ffffff', font=('Segoe UI', 13, 'bold')
-             ).pack(padx=pad, pady=(pad, 4), anchor='w')
+    def px(value: float) -> int:
+        return round(value * scale)
 
-    tk.Label(dialog,
-             text="请输入您的 API Key\n默认使用智谱 GLM，免费申请：bigmodel.cn  →  API Keys",
-             bg=BG, fg='#888888', font=('Segoe UI', 9), justify='left'
-             ).pack(padx=pad, anchor='w')
-
-    tk.Frame(dialog, bg='#333333', height=1).pack(fill='x', padx=pad, pady=(14, 0))
-
-    f = tk.Frame(dialog, bg=BG2, padx=12, pady=10)
-    f.pack(fill='x', padx=pad, pady=(10, 0))
-
-    tk.Label(f, text="API Key", bg=BG2, fg='#aaaaaa',
-             font=('Segoe UI', 9)).pack(anchor='w')
-
-    entry_var = tk.StringVar(value=current.get('api_key', ''))
-    entry = tk.Entry(f, textvariable=entry_var, show='*', **entry_style)
-    entry.pack(fill='x', pady=(4, 0), ipady=6)
-
-    show_var = tk.BooleanVar()
-    tk.Checkbutton(f, text="显示密钥", variable=show_var,
-                   command=lambda: entry.config(show='' if show_var.get() else '*'),
-                   bg=BG2, fg='#666666', selectcolor=BG2,
-                   activebackground=BG2, font=('Segoe UI', 8), borderwidth=0
-                   ).pack(anchor='w', pady=(4, 0))
-
-    # ── 更多设置：自定义接口地址和模型 ──
-    toggle = tk.Button(dialog, bg=BG, fg='#8ab4f8', activebackground=BG,
-                       activeforeground='#aecbfa', relief='flat', borderwidth=0,
-                       font=('Segoe UI', 9), cursor='hand2', anchor='w')
-    toggle.pack(padx=pad, pady=(10, 0), anchor='w')
-
-    more = tk.Frame(dialog, bg=BG2, padx=12, pady=10)
+    W = 470
+    canvas = tk.Canvas(dialog, width=px(W), height=px(400), bg=CRAYON_PAPER,
+                       highlightthickness=0, borderwidth=0)
+    canvas.pack()
+    entry_style = dict(bg='#ffffff', fg=CRAYON_INK, insertbackground=CRAYON_INK,
+                       relief='flat', borderwidth=0, highlightthickness=0,
+                       font=('Consolas', 11))
+    key_var = tk.StringVar(value=current.get('api_key', ''))
     base_var = tk.StringVar(value=current.get('base_url') or DEFAULT_BASE_URL)
     model_var = tk.StringVar(value=current.get('model') or MODEL)
-    for label, var in (("接口地址（Base URL）", base_var), ("模型", model_var)):
-        tk.Label(more, text=label, bg=BG2, fg='#aaaaaa',
-                 font=('Segoe UI', 9)).pack(anchor='w', pady=(0 if var is base_var else 8, 0))
-        tk.Entry(more, textvariable=var, **entry_style).pack(fill='x', pady=(4, 0), ipady=6)
-    tk.Label(more,
-             text="支持 OpenAI 兼容接口，例如 https://api.deepseek.com、\n"
-                  "https://api.openai.com/v1，会自动补上 /chat/completions。",
-             bg=BG2, fg='#666666', font=('Segoe UI', 8), justify='left'
-             ).pack(anchor='w', pady=(6, 0))
-    more_buttons = tk.Frame(more, bg=BG2)
-    more_buttons.pack(fill='x', pady=(8, 0))
-    test_lbl = tk.Label(more, text="", bg=BG2, fg='#888888', font=('Segoe UI', 9),
-                        justify='left', wraplength=380)
-    test_lbl.pack(anchor='w', pady=(6, 0))
+    key_entry = tk.Entry(canvas, textvariable=key_var, show='*', **entry_style)
+    base_entry = tk.Entry(canvas, textvariable=base_var, **entry_style)
+    model_entry = tk.Entry(canvas, textvariable=model_var, **entry_style)
+
+    state = {'expanded': bool(current.get('base_url') or current.get('model')),
+             'show_key': False, 'error': '', 'test': '', 'test_color': CRAYON_MUTED,
+             'testing': False}
+    hotspots: dict[str, tuple] = {}
+    result = {'settings': None}
+
+    def font(size: int, bold: bool = False):
+        return (family, size, 'bold') if bold else (family, size)
+
+    def render():
+        canvas.delete('all')
+        hotspots.clear()
+        expanded = state['expanded']
+        y_more = 236
+        y_error = y_more + (284 if expanded else 0)
+        y_buttons = y_error + 30
+        height = y_buttons + 112
+        canvas.config(height=px(height))
+
+        art = CrayonDrawing(px(W), px(height), scale)
+        art.cloud(250, 18, 92)
+        art.sun(W - 58, 54, 24)
+        art.box((24, 150, W - 24, 192), CRAYON_BLUE, fill='#ffffff')
+        art.checkbox(28, 203)
+        art.triangle(30, y_more + 4, 13, expanded, CRAYON_ORANGE)
+        if expanded:
+            art.box((24, y_more + 58, W - 24, y_more + 100), CRAYON_PURPLE, fill='#ffffff')
+            art.box((24, y_more + 136, W - 24, y_more + 178), CRAYON_GREEN, fill='#ffffff')
+            art.box((24, y_more + 238, 132, y_more + 274), CRAYON_DARK_GREEN,
+                    scribble='#c8ecb5', radius=12)
+            art.box((144, y_more + 238, 252, y_more + 274), CRAYON_ORANGE,
+                    scribble='#fde6a6', radius=12)
+        art.box((W - 252, y_buttons, W - 140, y_buttons + 42), CRAYON_RED,
+                scribble='#f9b8a8', radius=14, width=2.8)
+        art.box((W - 128, y_buttons, W - 24, y_buttons + 42), CRAYON_MUTED,
+                scribble='#e6e1ee', radius=14)
+        art.grass(height - 46, height, W)
+        for fx, color in ((34, CRAYON_RED), (70, CRAYON_PINK), (112, CRAYON_PURPLE),
+                          (150, CRAYON_ORANGE)):
+            art.flower(fx, height - 58 + art.rng.uniform(-4, 4), height - 30, color)
+        canvas.image = ImageTk.PhotoImage(art.image, master=dialog)
+        canvas.create_image(0, 0, image=canvas.image, anchor='nw')
+
+        x = px(26)
+        for i, ch in enumerate("翻译工具设置"):
+            item = canvas.create_text(x, px(22), text=ch, anchor='nw', font=font(22),
+                                      fill=CRAYON_TITLE_COLORS[i % len(CRAYON_TITLE_COLORS)])
+            x = canvas.bbox(item)[2] + px(1)
+        canvas.create_text(px(28), px(72), anchor='nw', font=font(11), fill=CRAYON_INK,
+                           text="请输入您的 API Key")
+        canvas.create_text(px(28), px(96), anchor='nw', font=font(9), fill=CRAYON_MUTED,
+                           text="默认使用智谱 GLM，免费申请：bigmodel.cn → API Keys")
+        canvas.create_text(px(28), px(124), anchor='nw', font=font(11), fill=CRAYON_BLUE,
+                           text="API Key")
+        canvas.create_window(px(38), px(171), window=key_entry, anchor='w',
+                             width=px(W - 76), height=px(26))
+        if state['show_key']:
+            canvas.create_line(px(31), px(211), px(36), px(217), px(46), px(201),
+                               fill=CRAYON_RED, width=px(3), capstyle='round',
+                               joinstyle='round', smooth=True)
+        canvas.create_text(px(52), px(211), anchor='w', font=font(10), fill=CRAYON_INK,
+                           text="显示密钥")
+        hotspots['show_key'] = (26, 199, 120, 223)
+
+        canvas.create_text(px(50), px(y_more + 10), anchor='w', font=font(11),
+                           fill=CRAYON_ORANGE, text="更多设置（接口地址、模型）")
+        hotspots['toggle'] = (26, y_more - 4, 270, y_more + 24)
+        if expanded:
+            canvas.create_text(px(28), px(y_more + 34), anchor='nw', font=font(11),
+                               fill=CRAYON_PURPLE, text="接口地址（Base URL）")
+            canvas.create_window(px(38), px(y_more + 79), window=base_entry, anchor='w',
+                                 width=px(W - 76), height=px(26))
+            canvas.create_text(px(28), px(y_more + 112), anchor='nw', font=font(11),
+                               fill=CRAYON_DARK_GREEN, text="模型")
+            canvas.create_window(px(38), px(y_more + 157), window=model_entry, anchor='w',
+                                 width=px(W - 76), height=px(26))
+            canvas.create_text(px(28), px(y_more + 188), anchor='nw', font=font(9),
+                               fill=CRAYON_MUTED, justify='left',
+                               text="支持 OpenAI 兼容接口，例如 https://api.deepseek.com、\n"
+                                    "https://api.openai.com/v1，会自动补上 /chat/completions。")
+            canvas.create_text(px(78), px(y_more + 256), font=font(11), fill=CRAYON_INK,
+                               text="测试中…" if state['testing'] else "测试连接", tags='test')
+            canvas.create_text(px(198), px(y_more + 256), font=font(11), fill=CRAYON_INK,
+                               text="恢复默认")
+            hotspots['test'] = (24, y_more + 238, 132, y_more + 274)
+            hotspots['reset'] = (144, y_more + 238, 252, y_more + 274)
+            canvas.create_text(px(264), px(y_more + 256), anchor='w', font=font(9),
+                               fill=state['test_color'], text=state['test'],
+                               width=px(W - 290))
+        canvas.create_text(px(28), px(y_error + 12), anchor='w', font=font(10),
+                           fill=CRAYON_RED, text=state['error'], width=px(W - 56))
+        canvas.create_text(px(W - 196), px(y_buttons + 21), font=font(13), fill=CRAYON_INK,
+                           text="确认")
+        canvas.create_text(px(W - 76), px(y_buttons + 21), font=font(13), fill=CRAYON_INK,
+                           text="取消")
+        hotspots['confirm'] = (W - 252, y_buttons, W - 140, y_buttons + 42)
+        hotspots['cancel'] = (W - 128, y_buttons, W - 24, y_buttons + 42)
+        return height
+
+    def hit(event) -> str | None:
+        x, y = event.x / scale, event.y / scale
+        for name, (x0, y0, x1, y1) in hotspots.items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return name
+        return None
+
+    def on_motion(event):
+        canvas.config(cursor='hand2' if hit(event) else '')
+
+    def on_click(event):
+        actions = {'show_key': toggle_key, 'toggle': toggle_more, 'test': run_test,
+                   'reset': reset_endpoint, 'confirm': on_confirm, 'cancel': dialog.destroy}
+        name = hit(event)
+        if name:
+            actions[name]()
+
+    def toggle_key():
+        state['show_key'] = not state['show_key']
+        key_entry.config(show='' if state['show_key'] else '*')
+        render()
+
+    def toggle_more():
+        state['expanded'] = not state['expanded']
+        render()
+        keep_on_screen()
 
     def reset_endpoint():
         base_var.set(DEFAULT_BASE_URL)
         model_var.set(MODEL)
-        test_lbl.config(text="")
+        state['test'] = ''
+        render()
 
     def run_test():
-        settings, error = validate_api_settings(entry_var.get(), base_var.get(),
-                                                model_var.get())
-        if not settings:
-            test_lbl.config(text=error, fg='#ff6b6b')
+        if state['testing']:
             return
-        test_lbl.config(text="正在测试…", fg='#888888')
-        test_btn.config(state='disabled')
+        settings, error = validate_api_settings(key_var.get(), base_var.get(), model_var.get())
+        if not settings:
+            state.update(test=error, test_color=CRAYON_RED)
+            render()
+            return
+        state.update(testing=True, test='', test_color=CRAYON_MUTED)
+        render()
         outcome = {}
 
         def work():
@@ -391,70 +712,47 @@ def show_settings_dialog(root: tk.Tk, current: dict | None = None) -> dict | Non
             if not outcome:
                 dialog.after(100, wait)
                 return
-            test_btn.config(state='normal')
+            state['testing'] = False
             if 'error' in outcome:
-                test_lbl.config(text=f"连接失败：{outcome['error'][:200]}", fg='#ff6b6b')
+                state.update(test=f"连接失败：{outcome['error'][:160]}", test_color=CRAYON_RED)
             else:
-                test_lbl.config(text=f"连接成功：Hello → {outcome['text'][:60]}",
-                                fg='#7bd88f')
+                state.update(test=f"连接成功：Hello → {outcome['text'][:40]}",
+                             test_color=CRAYON_DARK_GREEN)
+            render()
 
         threading.Thread(target=work, daemon=True).start()
         dialog.after(100, wait)
 
-    small = dict(bg='#333333', fg='#bbbbbb', activebackground='#3a3a3a',
-                 relief='flat', font=('Segoe UI', 9), padx=10, pady=3, cursor='hand2')
-    test_btn = tk.Button(more_buttons, text="测试连接", command=run_test, **small)
-    test_btn.pack(side='left')
-    tk.Button(more_buttons, text="恢复默认", command=reset_endpoint, **small
-              ).pack(side='left', padx=(8, 0))
-
-    def set_expanded(expanded: bool):
-        if expanded:
-            more.pack(fill='x', padx=pad, pady=(6, 0), after=toggle)
-        else:
-            more.pack_forget()
-        toggle.config(text=("▾ 更多设置（接口地址、模型）" if expanded
-                            else "▸ 更多设置（接口地址、模型）"),
-                      command=lambda: set_expanded(not expanded))
-
-    err_lbl = tk.Label(dialog, text="", bg=BG, fg='#ff6b6b', font=('Segoe UI', 9))
-    err_lbl.pack(padx=pad, anchor='w')
-    set_expanded(bool(current.get('base_url') or current.get('model')))
-
-    btn_frame = tk.Frame(dialog, bg=BG)
-    btn_frame.pack(fill='x', padx=pad, pady=(4, pad))
-
-    result = {'settings': None}
-
     def on_confirm():
-        settings, error = validate_api_settings(entry_var.get(), base_var.get(),
-                                                model_var.get())
+        settings, error = validate_api_settings(key_var.get(), base_var.get(), model_var.get())
         if not settings:
-            err_lbl.config(text=error)
+            state['error'] = error
+            render()
             return
         result['settings'] = settings
         dialog.destroy()
 
-    tk.Button(btn_frame, text="取消",
-              bg='#333333', fg='#888888', activebackground='#3a3a3a',
-              relief='flat', font=('Segoe UI', 10),
-              padx=16, pady=6, cursor='hand2', command=dialog.destroy
-              ).pack(side='right', padx=(8, 0))
+    def keep_on_screen():
+        dialog.update_idletasks()
+        left, top, right, bottom = get_work_area(dialog.winfo_rootx(), dialog.winfo_rooty())
+        y = min(dialog.winfo_y(), bottom - dialog.winfo_height() - px(40))
+        dialog.geometry(f'+{dialog.winfo_x()}+{max(top, y)}')
 
-    tk.Button(btn_frame, text="  确认  ",
-              bg=ACCENT, fg='#ffffff', activebackground='#3a8eef',
-              relief='flat', font=('Segoe UI', 10, 'bold'),
-              padx=16, pady=6, cursor='hand2', command=on_confirm
-              ).pack(side='right')
-
+    canvas.bind('<Motion>', on_motion)
+    canvas.bind('<Button-1>', on_click)
     dialog.bind('<Return>', lambda e: on_confirm())
     dialog.bind('<Escape>', lambda e: dialog.destroy())
+    # 按钮都是画出来的，没有控件可点；测试和辅助功能通过这里直接触发。
+    dialog.actions = {'toggle_more': toggle_more, 'confirm': on_confirm,
+                      'cancel': dialog.destroy, 'test': run_test,
+                      'reset': reset_endpoint, 'show_key': toggle_key}
 
+    render()
     dialog.update_idletasks()
     w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
     sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
-    dialog.geometry(f'+{(sw-w)//2}+{(sh-h)//2}')
-    entry.focus_set()
+    dialog.geometry(f'+{(sw - w) // 2}+{max(0, (sh - h) // 2 - px(60))}')
+    key_entry.focus_set()
     dialog.wait_window()
     return result['settings']
 

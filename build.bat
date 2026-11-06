@@ -19,6 +19,7 @@ rem --specpath keeps the generated spec inside the ignored build cache.
     --hidden-import pynput._util.win32_vks --hidden-import win32api ^
     --hidden-import win32con --hidden-import win32gui --hidden-import aiohttp ^
     --collect-all pynput --collect-all pystray --collect-all edge_tts ^
+    --add-data "%~dp0assets\fonts;assets\fonts" ^
     translator.py
 if errorlevel 1 goto error
 echo [OK] Output: %~dp0releases\translator.exe

@@ -108,7 +108,7 @@ API Key 保存在脚本或 EXE 同目录的 `translator_config.ini` 中。通常
 
 PyInstaller 参数直接写在 `build.bat` 中，输出单文件 `releases\translator.exe`。构建缓存和自动生成的 spec 文件位于 `build-public\`，不会覆盖旧的 `dist\`。接收 EXE 的人不需要安装 Python，但仍需要网络和自己的 API Key。
 
-分发时携带 `LICENSE` 并保留第三方依赖所需的许可声明，**不要携带 `translator_config.ini`**。自行构建的 EXE 未进行代码签名，Windows 可能显示未知发布者提示；请核实来源，不要关闭安全防护。
+分发时携带 `LICENSE` 和 `assets/fonts/OFL.txt`，并保留第三方依赖所需的许可声明，**不要携带 `translator_config.ini`**。自行构建的 EXE 未进行代码签名，Windows 可能显示未知发布者提示；请核实来源，不要关闭安全防护。
 
 ## 已知限制与排错
 
@@ -128,3 +128,5 @@ PyInstaller 参数直接写在 `build.bat` 中，输出单文件 `releases\trans
 ## 许可证
 
 项目源码采用 [MIT License](LICENSE)，允许使用、修改和分发，需保留版权及许可声明。第三方依赖和在线服务分别遵循各自的许可及服务条款。
+
+设置窗口使用的字体是[站酷快乐体（ZCOOL KuaiLe）](https://github.com/googlefonts/zcool-kuaile)，位于 `assets/fonts/`，采用 [SIL Open Font License 1.1](assets/fonts/OFL.txt)，打包时会一并放进 EXE。
