@@ -1,4 +1,4 @@
-"""液态玻璃调节器：在几种测试背景上打开翻译工具的“外观”窗口，方便对比效果。"""
+"""液态玻璃调节器：在几种测试背景上打开 SelectTrans 的“外观”窗口，方便对比效果。"""
 
 import os
 import sys
@@ -7,7 +7,7 @@ import tkinter as tk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import translator as tr  # noqa: E402
+import selecttrans as tr  # noqa: E402
 
 BACKDROPS = ['风景渐变', '彩色条纹', '白色网页', '深色网页']
 

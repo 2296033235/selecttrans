@@ -25,6 +25,6 @@
 
 Pull Request 中请说明改了什么、为什么修改、如何验证。新增依赖时同步更新依赖文件和安装文档，修改打包行为时验证 `build.bat`。
 
-不要提交 `translator_config.ini`、`.venv`、构建产物或私人笔记。提交前检查 `git diff --cached`；不要使用 `git add -f` 强制添加真实配置。
+不要提交 `selecttrans_config.ini`、`.venv`、构建产物或私人笔记。提交前检查 `git diff --cached`；不要使用 `git add -f` 强制添加真实配置。
 
 贡献到本仓库的代码应可按本项目的 MIT 许可证发布；引用第三方代码或资源时请标明来源，并遵守其原有许可证。

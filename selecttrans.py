@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-极简翻译工具 - Double Ctrl to translate selected text
+SelectTrans - 划词即译的 Windows 桌面翻译工具。
+
+选中文字后按快捷键，在鼠标旁显示中英翻译；支持自定义组合键、
+液态玻璃悬浮窗、字号与颜色调整、朗读和托盘常驻。
 """
 
 import functools
@@ -30,10 +33,11 @@ from pynput import mouse as pynmouse
 
 # ── 常量 ─────────────────────────────────────────────────────
 
+APP_NAME              = "SelectTrans"
 MODEL                 = "glm-4-flash-250414"
 DEFAULT_BASE_URL      = "https://open.bigmodel.cn/api/paas/v4"   # OpenAI 兼容接口
 DOUBLE_CLICK_INTERVAL = 0.4
-STARTUP_NAME          = "Translator"
+STARTUP_NAME          = APP_NAME      # 开机自启在注册表里的值名
 
 BG       = '#1e1e1e'
 BG2      = '#252525'
@@ -80,7 +84,7 @@ def _app_dir() -> str:
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_FILE = os.path.join(_app_dir(), 'translator_config.ini')
+CONFIG_FILE = os.path.join(_app_dir(), 'selecttrans_config.ini')
 
 
 def _read_config() -> configparser.ConfigParser:
@@ -235,11 +239,15 @@ def set_startup(enable: bool):
 # ── 系统托盘图标 ──────────────────────────────────────────────
 
 def _make_icon() -> Image.Image:
+    """托盘图标：圆角方块上的三行文本，中间一行是高亮的选中内容，右下角一支向下箭头。"""
     img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse([2, 2, 61, 61], fill='#4a9eff')
-    d.rectangle([15, 17, 49, 25], fill='white')   # T 横
-    d.rectangle([28, 17, 36, 47], fill='white')   # T 竖
+    d.rounded_rectangle([3, 3, 60, 60], radius=15, fill='#2563eb')
+    d.rounded_rectangle([14, 15, 50, 20], radius=2, fill='#e6f1fb')
+    d.rounded_rectangle([14, 26, 43, 31], radius=2, fill='#fcd34d')   # 选中的一行
+    d.rounded_rectangle([14, 37, 35, 42], radius=2, fill='#e6f1fb')
+    d.rectangle([46, 42, 50, 51], fill='#ffffff')                     # 箭头杆
+    d.polygon([(40, 49), (56, 49), (48, 58)], fill='#ffffff')         # 箭头头部
     return img
 
 
@@ -271,7 +279,7 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
         root.after(0, root.quit)
 
     menu = pystray.Menu(
-        pystray.MenuItem('翻译工具', None, enabled=False),
+        pystray.MenuItem(APP_NAME, None, enabled=False),
         pystray.MenuItem(lambda item: f'模型：{API_MODEL or MODEL}', None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('接口设置（API Key / 模型）', on_settings),
@@ -283,7 +291,7 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
         pystray.MenuItem('退出', on_quit),
     )
     icon = pystray.Icon(STARTUP_NAME, _make_icon(),
-                        '翻译工具  (双击 Ctrl 翻译选中文字)', menu)
+                        f'{APP_NAME}  ({format_hotkey(_hotkey.spec)} 划词翻译)', menu)
     icon.run_detached()
     return icon
 
@@ -543,7 +551,7 @@ def show_settings_dialog(root: tk.Tk, current: dict | None = None) -> dict | Non
     current = current or {}
     family = crayon_font_family()
     dialog = tk.Toplevel(root)
-    dialog.title("翻译工具 - 设置")
+    dialog.title(f"{APP_NAME} - 设置")
     dialog.resizable(False, False)
     dialog.attributes('-topmost', True)
     dialog.configure(bg=CRAYON_PAPER)
@@ -611,7 +619,7 @@ def show_settings_dialog(root: tk.Tk, current: dict | None = None) -> dict | Non
         canvas.create_image(0, 0, image=canvas.image, anchor='nw')
 
         x = px(26)
-        for i, ch in enumerate("翻译工具设置"):
+        for i, ch in enumerate(APP_NAME):
             item = canvas.create_text(x, px(22), text=ch, anchor='nw', font=font(22),
                                       fill=CRAYON_TITLE_COLORS[i % len(CRAYON_TITLE_COLORS)])
             x = canvas.bbox(item)[2] + px(1)
@@ -2313,7 +2321,7 @@ def open_style_editor(root: tk.Tk, on_close=None) -> tk.Toplevel:
     opened = get_glass_style()
     win = tk.Toplevel(root)
     _style_editor = win
-    win.title('翻译工具 - 外观设置')
+    win.title(f'{APP_NAME} - 外观设置')
     win.resizable(False, False)
     win.attributes('-topmost', True)
     scale = ui_scale(win)
@@ -2495,7 +2503,7 @@ def open_hotkey_dialog(root: tk.Tk) -> tk.Toplevel:
 
     win = tk.Toplevel(root)
     _hotkey_dialog = win
-    win.title('翻译工具 - 快捷键')
+    win.title(f'{APP_NAME} - 快捷键')
     win.resizable(False, False)
     win.attributes('-topmost', True)
     scale = ui_scale(win)

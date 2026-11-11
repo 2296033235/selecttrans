@@ -1,4 +1,5 @@
 # Local credentials and configuration (also matches nested copies).
+selecttrans_config.ini
 translator_config.ini
 .env
 .env.*

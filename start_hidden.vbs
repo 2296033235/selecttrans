@@ -4,10 +4,10 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 pythonw = fso.BuildPath(scriptDir, ".venv\Scripts\pythonw.exe")
-scriptPath = fso.BuildPath(scriptDir, "translator.py")
+scriptPath = fso.BuildPath(scriptDir, "selecttrans.py")
 
 If Not fso.FileExists(pythonw) Then
-    MsgBox "Python environment not found. Please run setup.bat first.", 16, "Translator"
+    MsgBox "Python environment not found. Please run setup.bat first.", 16, "SelectTrans"
     WScript.Quit 1
 End If
 

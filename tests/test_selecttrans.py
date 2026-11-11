@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 if sys.platform == 'win32':
-    import translator
+    import selecttrans as translator
 else:
     translator = None
 
@@ -46,7 +46,7 @@ class ConfigTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.config = Path(directory.name) / 'translator_config.ini'
+        self.config = Path(directory.name) / 'selecttrans_config.ini'
         config_patch = patch.object(translator, 'CONFIG_FILE', str(self.config))
         config_patch.start()
         self.addCleanup(config_patch.stop)
@@ -288,7 +288,7 @@ class HotkeyTests(unittest.TestCase):
         self.addCleanup(translator.apply_hotkey, translator.DEFAULT_HOTKEY)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.config = Path(directory.name) / 'translator_config.ini'
+        self.config = Path(directory.name) / 'selecttrans_config.ini'
         config_patch = patch.object(translator, 'CONFIG_FILE', str(self.config))
         config_patch.start()
         self.addCleanup(config_patch.stop)
@@ -745,7 +745,7 @@ class FontSizeTests(unittest.TestCase):
         self.addCleanup(translator.set_glass_style, translator.get_glass_style())
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.config = Path(directory.name) / 'translator_config.ini'
+        self.config = Path(directory.name) / 'selecttrans_config.ini'
         config_patch = patch.object(translator, 'CONFIG_FILE', str(self.config))
         config_patch.start()
         self.addCleanup(config_patch.stop)
