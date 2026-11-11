@@ -34,8 +34,8 @@
 命令行方式：
 
 ```powershell
-git clone https://github.com/2296033235/double-ctrl-translator.git
-cd double-ctrl-translator
+git clone https://github.com/2296033235/selecttrans.git
+cd selecttrans
 .\setup.bat
 .\start.bat
 ```
