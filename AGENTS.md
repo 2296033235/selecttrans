@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Windows 10/11 desktop translator requiring Python 3.11+ with Tkinter. `translator.py` contains configuration, BigModel requests, keyboard listeners, the Tkinter popup, tray controls, and speech playback. The tray icon is generated in code; there is no separate assets directory. The glass popup is a layered window drawn with Pillow from a capture of the screen behind it; its style lives in the `GLASS_*` constants, can be changed from the tray's appearance editor, and is saved in the `[glass]` section of `translator_config.ini`. `tools/glass_tuner.py` opens that editor over synthetic test backdrops.
+This is a Windows 10/11 desktop translator requiring Python 3.11+ with Tkinter. `translator.py` contains configuration, BigModel requests, keyboard listeners, the Tkinter popup, tray controls, and speech playback. The trigger is configurable through the tray's hotkey editor and stored as `[settings] hotkey`: `double-ctrl` keeps the double-tap gesture, while values such as `ctrl+shift+t` or `f2` are matched by `HotkeyMatcher`. The tray icon is generated in code; `assets/fonts/` only carries the ZCOOL KuaiLe font used by the settings dialog. The glass popup is a layered window drawn with Pillow from a capture of the screen behind it; its style, including the original and translation font sizes, lives in the `GLASS_*` constants, can be changed from the tray's appearance editor, and is saved in the `[glass]` section of `translator_config.ini`. `tools/glass_tuner.py` opens that editor over synthetic test backdrops.
 
 `tests/test_translator.py` covers language detection, configuration, translation requests, and Ctrl gestures. Root-level batch scripts handle setup, launching, startup registration, and packaging. `build.bat` holds the PyInstaller options; the generated spec lives in `build-public\` and is not tracked. Runtime dependencies are pinned in `requirements.txt`; `requirements-dev.txt` adds packaging tools.
 
@@ -37,7 +37,7 @@ Run tests on Windows; they are skipped on other platforms. Mock network requests
 
 ## Commit & Pull Request Guidelines
 
-History currently contains one commit: `Initial open-source release of Double Ctrl Translator`. Use concise, descriptive commit subjects; no enforced prefix convention exists.
+History starts with `Initial open-source release of Double Ctrl Translator` and has grown since; use concise, descriptive commit subjects; no enforced prefix convention exists.
 
 Keep each PR focused. Explain what changed, why, and how it was verified; link relevant issues and include screenshots for UI changes. Update dependency files and installation documentation together. Validate `build.bat` when changing packaging. See `CONTRIBUTING.md` for contribution details.
 

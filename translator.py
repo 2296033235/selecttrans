@@ -55,6 +55,8 @@ GLASS_REFRACT_BAND = 18         # 折射带宽度
 GLASS_TEXT_MODE    = 'auto'     # auto 按背景深浅自动选 / dark / light
 GLASS_TEXT         = '#141418'  # 深色文字
 GLASS_TEXT_LIGHT   = '#ffffff'  # 浅色文字
+GLASS_FONT_ORIG    = 12         # 原文字号（100% 缩放下的像素）
+GLASS_FONT_TEXT    = 15         # 译文字号
 GLASS_HALO         = 0          # 文字衬光浓度，调高后花哨背景上更易读
 GLASS_SOLID        = '#f4f4f6'  # 截不到背景时的不透明底色
 GLASS_SOLID_ALPHA  = 245
@@ -137,6 +139,8 @@ GLASS_STYLE_FIELDS = {
     'text_mode':  ('GLASS_TEXT_MODE', ('auto', 'dark', 'light')),
     'text_dark':  ('GLASS_TEXT', 'color'),
     'text_light': ('GLASS_TEXT_LIGHT', 'color'),
+    'font_orig':  ('GLASS_FONT_ORIG', (9, 28)),
+    'font_text':  ('GLASS_FONT_TEXT', (10, 32)),
     'halo':       ('GLASS_HALO', (0, 255)),
 }
 _HEX_COLOR = re.compile(r'#[0-9a-fA-F]{6}')
@@ -249,6 +253,16 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
                 icon.update_menu()
         root.after(0, _do)
 
+    def on_appearance(icon, item):
+        def _do():
+            open_style_editor(root)
+        root.after(0, _do)
+
+    def on_hotkey(icon, item):
+        def _do():
+            open_hotkey_dialog(root)
+        root.after(0, _do)
+
     def on_toggle_startup(icon, item):
         set_startup(not is_startup_enabled())
 
@@ -261,6 +275,8 @@ def setup_tray(root: tk.Tk) -> pystray.Icon:
         pystray.MenuItem(lambda item: f'模型：{API_MODEL or MODEL}', None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('接口设置（API Key / 模型）', on_settings),
+        pystray.MenuItem('外观设置（字体 / 颜色）', on_appearance),
+        pystray.MenuItem('快捷键设置', on_hotkey),
         pystray.MenuItem('开机自启', on_toggle_startup,
                          checked=lambda item: is_startup_enabled()),
         pystray.Menu.SEPARATOR,
@@ -1323,7 +1339,8 @@ def _glass_metrics(original: str, translation: str, ui_scale: float) -> dict:
     width = px(GLASS_WIDTH)
     pad_x, pad_top, pad_bottom = px(16), px(14), px(12)
     content_width = width - 2 * pad_x
-    orig_font, text_font = _glass_font(px(12)), _glass_font(px(15))
+    orig_font, text_font = (_glass_font(px(GLASS_FONT_ORIG)),
+                            _glass_font(px(GLASS_FONT_TEXT)))
     orig_line, text_line = round(orig_font.size * 1.45), round(text_font.size * 1.55)
     button = px(26)
 
@@ -1579,10 +1596,6 @@ def render_glass_popup(original: str, translation: str, ui_scale: float = 1.0, *
 
 _ui_queue: queue.Queue = queue.Queue()
 _simulating          = False
-_ctrl_pressed        = False   # Ctrl 当前是否按住
-_ctrl_press_time     = 0.0     # Ctrl 按下的时间
-_last_ctrl_click_t   = 0.0     # 上一次有效单击的释放时间
-_other_key_in_ctrl   = False   # Ctrl 按住期间是否按了其他键
 
 
 def translation_worker():
@@ -1609,44 +1622,207 @@ def translation_worker():
 MAX_HOLD = 0.35   # 超过此时长视为长按，忽略
 
 
+# ── 快捷键 ────────────────────────────────────────────────────
+#
+# 配置里存的是文本：'double-ctrl'（双击修饰键）或 'ctrl+shift+t'（组合键），
+# 单个按键如 'f2' 也算组合键的一种。双击模式保留原有手势：短按、期间不按其他键。
+
+DEFAULT_HOTKEY = 'double-ctrl'
+_DOUBLE_MODIFIERS = ('ctrl', 'alt', 'shift', 'win')
+_MODIFIER_KEYS = frozenset(_DOUBLE_MODIFIERS)
+_MODIFIER_ALIASES = {
+    'ctrl_l': 'ctrl', 'ctrl_r': 'ctrl',
+    'control_l': 'ctrl', 'control_r': 'ctrl',
+    'shift_l': 'shift', 'shift_r': 'shift',
+    'alt_l': 'alt', 'alt_r': 'alt', 'alt_gr': 'alt',
+    'cmd': 'win', 'cmd_l': 'win', 'cmd_r': 'win',
+    'win_l': 'win', 'win_r': 'win',
+}
+_KEY_LABELS = {
+    'ctrl': 'Ctrl', 'shift': 'Shift', 'alt': 'Alt', 'win': 'Win',
+    'space': 'Space', 'tab': 'Tab', 'enter': 'Enter', 'esc': 'Esc',
+    'backspace': 'Backspace', 'delete': 'Delete', 'insert': 'Insert',
+    'home': 'Home', 'end': 'End', 'page_up': 'PageUp', 'page_down': 'PageDown',
+    'caps_lock': 'CapsLock', 'print_screen': 'PrintScreen',
+    'scroll_lock': 'ScrollLock', 'pause': 'Pause', 'menu': 'Menu',
+}
+_MODIFIER_ORDER = {'ctrl': 0, 'shift': 1, 'alt': 2, 'win': 3}
+
+
+def key_name(key) -> str:
+    """把 pynput 的按键对象转成规范名：修饰键归一，字符键取小写。
+
+    Ctrl 组合下字符键的 char 往往是控制字符（Ctrl+C 是 \\x03），
+    这时退回用 vk 还原成字母、数字或功能键名。
+    """
+    name = getattr(key, 'name', None)
+    if name:
+        return _MODIFIER_ALIASES.get(name, name)
+    char = getattr(key, 'char', None)
+    if char and char.isprintable() and not char.isspace():
+        return char.lower()
+    vk = getattr(key, 'vk', None)
+    if vk is None:
+        return ''
+    if 65 <= vk <= 90:                      # A-Z
+        return chr(vk).lower()
+    if 48 <= vk <= 57:                      # 0-9
+        return chr(vk)
+    if 112 <= vk <= 123:                    # F1-F12
+        return f'f{vk - 111}'
+    return f'vk{vk}'
+
+
+def parse_hotkey(text: str) -> dict:
+    """解析快捷键配置文本。
+
+    返回 {'mode': 'double', 'key': 'ctrl'} 或 {'mode': 'combo', 'keys': frozenset}。
+    无法识别时退回默认的双击 Ctrl。
+    """
+    raw = (text or '').strip().lower().replace(' ', '')
+    if raw.startswith('double-') and raw[7:] in _MODIFIER_KEYS:
+        return {'mode': 'double', 'key': raw[7:]}
+    keys = frozenset(_MODIFIER_ALIASES.get(part, part)
+                     for part in raw.split('+') if part)
+    if keys:
+        return {'mode': 'combo', 'keys': keys}
+    return {'mode': 'double', 'key': 'ctrl'}
+
+
+def hotkey_text(spec: dict) -> str:
+    """把解析结果写回配置文本。"""
+    if spec['mode'] == 'double':
+        return f"double-{spec['key']}"
+    return '+'.join(sorted(spec['keys'],
+                           key=lambda k: (_MODIFIER_ORDER.get(k, 9), k)))
+
+
+def format_hotkey(spec: dict) -> str:
+    """给界面显示的可读文本。"""
+    if spec['mode'] == 'double':
+        return f"双击 {_KEY_LABELS.get(spec['key'], spec['key'].title())}"
+    parts = sorted(spec['keys'], key=lambda k: (_MODIFIER_ORDER.get(k, 9), k))
+    return '+'.join(_KEY_LABELS.get(p, p.upper() if len(p) == 1 else p.title())
+                    for p in parts)
+
+
+class HotkeyMatcher:
+    """把全局按键流翻译成“是否触发了快捷键”。
+
+    double 模式沿用双击修饰键的手势：短按、且按住期间没按其他键。
+    combo 模式在最后一个键按下时触发一次，直到松开其中任意键才重新生效，
+    这样按住不放也不会反复翻译。
+    """
+
+    def __init__(self, spec: dict | None = None):
+        self.spec = spec or parse_hotkey(DEFAULT_HOTKEY)
+        self.reset()
+
+    def reset(self):
+        self._pressed: set[str] = set()
+        self._mod_down = False
+        self._mod_press_t = 0.0
+        self._last_click_t = 0.0
+        self._other_key = False
+        self._fired = False
+
+    @property
+    def pressed(self) -> bool:
+        """双击模式下修饰键是否按住；组合模式下是否有键按住。"""
+        if self.spec['mode'] == 'double':
+            return self._mod_down
+        return bool(self._pressed)
+
+    def set_spec(self, spec: dict):
+        self.spec = spec
+        self.reset()
+
+    def press(self, name: str) -> bool:
+        if not name:
+            return False
+        if self.spec['mode'] == 'double':
+            return self._press_double(name)
+        self._pressed.add(name)
+        if not self._fired and self._pressed == self.spec['keys']:
+            self._fired = True
+            return True
+        return False
+
+    def release(self, name: str) -> bool:
+        if not name:
+            return False
+        if self.spec['mode'] == 'double':
+            return self._release_double(name)
+        self._pressed.discard(name)
+        if not self.spec['keys'] <= self._pressed:
+            self._fired = False
+        return False
+
+    def _press_double(self, name: str) -> bool:
+        if name == self.spec['key']:
+            if not self._mod_down:          # 避免长按重复触发
+                self._mod_down = True
+                self._mod_press_t = time.time()
+                self._other_key = False
+        else:
+            self._other_key = True
+        return False
+
+    def _release_double(self, name: str) -> bool:
+        if name != self.spec['key'] or not self._mod_down:
+            return False
+        hold = time.time() - self._mod_press_t
+        self._mod_down = False
+        # 长按 或 期间按了其他键（如 Ctrl+C）→ 不计入双击
+        if hold > MAX_HOLD or self._other_key:
+            self._last_click_t = 0.0
+            return False
+        now = time.time()
+        if now - self._last_click_t < DOUBLE_CLICK_INTERVAL:
+            self._last_click_t = 0.0
+            return True
+        self._last_click_t = now
+        return False
+
+
+_hotkey = HotkeyMatcher()
+
+
+def apply_hotkey(text: str):
+    """切换生效的快捷键；无法解析时退回默认的双击 Ctrl。"""
+    _hotkey.set_spec(parse_hotkey(text))
+
+
+def load_hotkey() -> str:
+    cfg = _read_config()
+    return cfg.get('settings', 'hotkey', fallback=DEFAULT_HOTKEY).strip() or DEFAULT_HOTKEY
+
+
+def save_hotkey(text: str):
+    cfg = _read_config()
+    if not cfg.has_section('settings'):
+        cfg.add_section('settings')
+    cfg.set('settings', 'hotkey', text)
+    _write_config(cfg)
+
+
 def on_key_press(key):
-    global _ctrl_pressed, _ctrl_press_time, _other_key_in_ctrl, _simulating
     if _simulating:
         return
-    if key in (pynkb.Key.ctrl_l, pynkb.Key.ctrl_r):
-        if not _ctrl_pressed:          # 避免长按重复触发
-            _ctrl_pressed      = True
-            _ctrl_press_time   = time.time()
-            _other_key_in_ctrl = False
-    else:
+    name = key_name(key)
+    if not name:
+        return
+    if name not in _MODIFIER_KEYS:      # 修饰键之外的动作视为新的操作
         _mouse_selection.clear()
-        if _ctrl_pressed:              # Ctrl 按住时又按了其他键（如 C、V）
-            _other_key_in_ctrl = True
+    if _hotkey.press(name):
+        threading.Thread(target=translation_worker, daemon=True).start()
 
 
 def on_key_release(key):
-    global _ctrl_pressed, _last_ctrl_click_t, _simulating
     if _simulating:
         return
-    if key not in (pynkb.Key.ctrl_l, pynkb.Key.ctrl_r):
-        return
-    if not _ctrl_pressed:
-        return
-
-    hold = time.time() - _ctrl_press_time
-    _ctrl_pressed = False
-
-    # 长按 或 期间按了其他键 → 不计入双击
-    if hold > MAX_HOLD or _other_key_in_ctrl:
-        _last_ctrl_click_t = 0.0
-        return
-
-    now = time.time()
-    if now - _last_ctrl_click_t < DOUBLE_CLICK_INTERVAL:
-        _last_ctrl_click_t = 0.0
+    if _hotkey.release(key_name(key)):
         threading.Thread(target=translation_worker, daemon=True).start()
-    else:
-        _last_ctrl_click_t = now
 
 
 # ── 悬浮窗管理 ────────────────────────────────────────────────
@@ -1970,10 +2146,11 @@ class PopupManager:
         frame = tk.Frame(popup, bg=BG, padx=self._px(16), pady=self._px(14))
         frame.pack(fill='both', expand=True)
 
-        # 原文（灰色截断）
+        # 原文（灰色截断）。经典主题比玻璃小一号，保持两边的观感接近。
         orig = (text[:80] + '…') if len(text) > 80 else text
         orig_label = tk.Label(frame, text=orig, bg=BG, fg=FG_ORIG,
-                              font=('Segoe UI', 9), wraplength=self._px(340),
+                              font=('Segoe UI', max(7, GLASS_FONT_ORIG - 3)),
+                              wraplength=self._px(340),
                               justify='left', cursor='fleur')
         orig_label.pack(anchor='w')
 
@@ -1988,7 +2165,7 @@ class PopupManager:
         # 译文（可选中复制）
         result_text = tk.Text(
             frame, bg=BG, fg='#ffffff',
-            font=('Microsoft YaHei UI', 11), width=36, height=1,
+            font=('Microsoft YaHei UI', max(8, GLASS_FONT_TEXT - 4)), width=36, height=1,
             wrap='word', relief='flat', borderwidth=0, highlightthickness=0,
             selectbackground=SEL_BG, selectforeground='#ffffff',
             inactiveselectbackground=SEL_BG, undo=False, cursor='xterm',
@@ -2107,6 +2284,7 @@ _STYLE_LAYOUT = (
      ('scale', 'brightness', '亮度 %'), ('scale', 'refraction', '边缘折射'),
      ('scale', 'radius', '圆角')),
     (('title', '文字'),
+     ('scale', 'font_orig', '原文字号'), ('scale', 'font_text', '译文字号'),
      ('mode', 'text_mode', '文字颜色'), ('color', 'text_dark', '深色文字'),
      ('color', 'text_light', '浅色文字'), ('scale', 'halo', '文字衬光'),
      ('title', '高光'),
@@ -2297,6 +2475,145 @@ def open_style_editor(root: tk.Tk, on_close=None) -> tk.Toplevel:
     return win
 
 
+# ── 快捷键设置窗口 ────────────────────────────────────────────
+
+_hotkey_dialog: tk.Toplevel | None = None
+
+
+def open_hotkey_dialog(root: tk.Tk) -> tk.Toplevel:
+    """快捷键设置：显示当前设置，可捕获组合键或选双击修饰键。"""
+    global _hotkey_dialog
+    if _hotkey_dialog is not None and _hotkey_dialog.winfo_exists():
+        _hotkey_dialog.deiconify()
+        _hotkey_dialog.lift()
+        _hotkey_dialog.focus_force()
+        return _hotkey_dialog
+
+    current = [load_hotkey()]
+    capturing = [False]
+    held_mods: set[str] = set()
+
+    win = tk.Toplevel(root)
+    _hotkey_dialog = win
+    win.title('翻译工具 - 快捷键')
+    win.resizable(False, False)
+    win.attributes('-topmost', True)
+    scale = ui_scale(win)
+
+    def px(value: float) -> int:
+        return round(value * scale)
+
+    font = ('Microsoft YaHei UI', 9)
+    body = tk.Frame(win, padx=px(18), pady=px(14))
+    body.pack(fill='both', expand=True)
+
+    tip = ('点“按下新快捷键”后直接按组合键，例如 Ctrl+Shift+T；'
+           '也可以从下面的预设里选双击某个修饰键。')
+    tk.Label(body, text='当前快捷键', font=font, fg='#666666').pack(anchor='w')
+    display = tk.Label(body, text=format_hotkey(parse_hotkey(current[0])),
+                       font=('Microsoft YaHei UI', 15, 'bold'), fg=ACCENT)
+    display.pack(anchor='w', pady=(px(2), px(8)))
+    hint = tk.Label(body, text=tip, font=font, fg='#666666',
+                    justify='left', wraplength=px(430))
+    hint.pack(anchor='w', pady=(0, px(10)))
+
+    def stop_capture():
+        capturing[0] = False
+        held_mods.clear()
+        win.unbind('<KeyPress>')
+
+    def show(text: str):
+        current[0] = text
+        display.config(text=format_hotkey(parse_hotkey(text)), fg=ACCENT)
+        hint.config(text=tip)
+        stop_capture()
+
+    def on_key(event):
+        if not capturing[0]:
+            return
+        mod = {'Control_L': 'ctrl', 'Control_R': 'ctrl',
+               'Shift_L': 'shift', 'Shift_R': 'shift',
+               'Alt_L': 'alt', 'Alt_R': 'alt',
+               'Win_L': 'win', 'Win_R': 'win'}.get(event.keysym)
+        if mod:
+            held_mods.add(mod)
+            return
+        mods = set(held_mods)
+        if event.state & 0x0004:            # Control
+            mods.add('ctrl')
+        if event.state & 0x0001:            # Shift
+            mods.add('shift')
+        if event.state & 0x20000:           # Alt
+            mods.add('alt')
+        show(hotkey_text({'mode': 'combo',
+                          'keys': frozenset(mods | {event.keysym.lower()})}))
+        return 'break'
+
+    def start_capture():
+        capturing[0] = True
+        held_mods.clear()
+        display.config(text='请按下快捷键…', fg=CRAYON_RED)
+        hint.config(text='等待按键：按下组合键即可，按 Esc 取消。')
+        win.focus_force()
+        win.bind('<KeyPress>', on_key)
+
+    row = tk.Frame(body)
+    row.pack(anchor='w', pady=(0, px(6)))
+    tk.Button(row, text='按下新快捷键', font=font, command=start_capture
+              ).pack(side='left', padx=(0, px(8)))
+    for name in _DOUBLE_MODIFIERS:
+        tk.Button(row, text=f'双击 {_KEY_LABELS[name]}', font=font,
+                  command=lambda n=name: show(f'double-{n}')
+                  ).pack(side='left', padx=(0, px(6)))
+
+    tk.Label(body, justify='left', wraplength=px(430), font=font, fg=CRAYON_ORANGE,
+             text='注意：Ctrl+C 这类系统快捷键也能设，但设置后每次复制都会弹出翻译窗，'
+                  '因为程序本身也靠模拟 Ctrl+C 取走选中文字。'
+             ).pack(anchor='w', pady=(px(6), px(10)))
+
+    footer = tk.Frame(body)
+    footer.pack(fill='x')
+    status = tk.Label(footer, font=font, fg='#c0392b')
+
+    def close():
+        global _hotkey_dialog
+        stop_capture()
+        _hotkey_dialog = None
+        win.destroy()
+
+    def on_escape(event):
+        if capturing[0]:
+            show(current[0])
+        else:
+            close()
+
+    def save():
+        try:
+            save_hotkey(current[0])
+        except OSError as e:
+            status.config(text=f'保存失败：{e}')
+            return
+        apply_hotkey(current[0])
+        close()
+
+    tk.Button(footer, text='  保存  ', font=font, command=save).pack(side='right')
+    tk.Button(footer, text='取消', font=font, padx=px(8),
+              command=close).pack(side='right', padx=(0, px(6)))
+    tk.Button(footer, text='恢复默认', font=font, padx=px(8),
+              command=lambda: show(DEFAULT_HOTKEY)).pack(side='left')
+    status.pack(side='left', padx=(px(8), 0))
+    win.protocol('WM_DELETE_WINDOW', close)
+    win.bind('<Escape>', on_escape)
+
+    win.update_idletasks()
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    left, top, right, bottom = get_work_area(*get_mouse_pos())
+    win.geometry(f'+{(left + right - w) // 2}'
+                 f'+{max(top + px(30), (top + bottom - h) // 2)}')
+    win.focus_force()
+    return win
+
+
 # ── 入口 ─────────────────────────────────────────────────────
 
 def main():
@@ -2315,6 +2632,7 @@ def main():
         save_api_settings(**settings)
         apply_api_settings(settings)
     load_glass_style()
+    apply_hotkey(load_hotkey())
 
     # 首次运行时自动开机自启（仅 exe 模式）
     if is_first_run and getattr(sys, 'frozen', False):

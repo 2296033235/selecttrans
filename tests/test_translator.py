@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -241,16 +242,11 @@ class TranslationTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
 class ShortcutTests(unittest.TestCase):
     def setUp(self):
-        state_patch = patch.multiple(
-            translator,
-            _simulating=False,
-            _ctrl_pressed=False,
-            _ctrl_press_time=0.0,
-            _last_ctrl_click_t=0.0,
-            _other_key_in_ctrl=False,
-        )
+        state_patch = patch.multiple(translator, _simulating=False)
         state_patch.start()
         self.addCleanup(state_patch.stop)
+        self.addCleanup(translator.apply_hotkey, translator.DEFAULT_HOTKEY)
+        translator.apply_hotkey(translator.DEFAULT_HOTKEY)
         thread_patch = patch.object(translator.threading, 'Thread')
         self.thread = thread_patch.start()
         self.addCleanup(thread_patch.stop)
@@ -280,8 +276,105 @@ class ShortcutTests(unittest.TestCase):
         with patch.object(translator, '_simulating', True):
             translator.on_key_press(translator.pynkb.Key.ctrl_l)
             translator.on_key_release(translator.pynkb.Key.ctrl_l)
-        self.assertFalse(translator._ctrl_pressed)
+        self.assertFalse(translator._hotkey.pressed)
         self.thread.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
+class HotkeyTests(unittest.TestCase):
+    """快捷键的解析、匹配与配置持久化。"""
+
+    def setUp(self):
+        self.addCleanup(translator.apply_hotkey, translator.DEFAULT_HOTKEY)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.config = Path(directory.name) / 'translator_config.ini'
+        config_patch = patch.object(translator, 'CONFIG_FILE', str(self.config))
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+
+    def test_missing_setting_defaults_to_double_ctrl(self):
+        self.assertEqual(translator.load_hotkey(), 'double-ctrl')
+
+    def test_parse_double_modifier(self):
+        self.assertEqual(translator.parse_hotkey('Double-Alt'),
+                         {'mode': 'double', 'key': 'alt'})
+
+    def test_parse_combo(self):
+        self.assertEqual(translator.parse_hotkey('Ctrl + Shift + T'),
+                         {'mode': 'combo', 'keys': frozenset({'ctrl', 'shift', 't'})})
+
+    def test_parse_single_key(self):
+        self.assertEqual(translator.parse_hotkey('F2'),
+                         {'mode': 'combo', 'keys': frozenset({'f2'})})
+
+    def test_unparsable_text_falls_back(self):
+        self.assertEqual(translator.parse_hotkey('+++'),
+                         {'mode': 'double', 'key': 'ctrl'})
+
+    def test_text_round_trip(self):
+        for text in ('double-ctrl', 'double-shift', 'ctrl+c', 'ctrl+shift+t', 'f2'):
+            self.assertEqual(translator.hotkey_text(translator.parse_hotkey(text)), text)
+
+    def test_display_text_is_readable(self):
+        self.assertEqual(translator.format_hotkey(translator.parse_hotkey('ctrl+c')),
+                         'Ctrl+C')
+        self.assertEqual(translator.format_hotkey(translator.parse_hotkey('double-ctrl')),
+                         '双击 Ctrl')
+
+    def test_key_names_are_normalized(self):
+        key = translator.pynkb
+        self.assertEqual(translator.key_name(key.Key.ctrl_r), 'ctrl')
+        self.assertEqual(translator.key_name(key.KeyCode.from_char('C')), 'c')
+        self.assertEqual(translator.key_name(key.KeyCode(vk=67, char='\x03')), 'c')
+        self.assertEqual(translator.key_name(key.Key.f2), 'f2')
+
+    def test_combo_triggers_once_per_press(self):
+        matcher = translator.HotkeyMatcher(translator.parse_hotkey('ctrl+c'))
+        self.assertFalse(matcher.press('ctrl'))
+        self.assertTrue(matcher.press('c'))
+        self.assertFalse(matcher.press('c'))       # 按住不放不重复触发
+        matcher.release('c')
+        matcher.release('ctrl')
+        self.assertFalse(matcher.press('c'))       # 少一个键不触发
+        self.assertTrue(matcher.press('ctrl'))
+
+    def test_combo_needs_every_key(self):
+        matcher = translator.HotkeyMatcher(translator.parse_hotkey('ctrl+shift+t'))
+        matcher.press('ctrl')
+        matcher.press('shift')
+        self.assertFalse(matcher.press('x'))
+
+    def test_double_mode_still_works(self):
+        matcher = translator.HotkeyMatcher()
+        with patch.object(translator.time, 'time', return_value=100.0):
+            matcher.press('ctrl')
+            self.assertFalse(matcher.release('ctrl'))
+            matcher.press('ctrl')
+            self.assertTrue(matcher.release('ctrl'))
+
+    def test_double_mode_ignores_taps_with_other_keys(self):
+        matcher = translator.HotkeyMatcher()
+        with patch.object(translator.time, 'time', return_value=100.0):
+            matcher.press('ctrl')
+            matcher.press('c')
+            matcher.release('c')
+            self.assertFalse(matcher.release('ctrl'))
+            matcher.press('ctrl')
+            self.assertFalse(matcher.release('ctrl'))
+
+    def test_hotkey_round_trip_in_config(self):
+        translator.save_hotkey('ctrl+shift+t')
+        self.assertEqual(translator.load_hotkey(), 'ctrl+shift+t')
+        text = self.config.read_text(encoding='utf-8')
+        self.assertIn('hotkey', text)
+        self.assertIn('ctrl+shift+t', text)
+
+    def test_apply_hotkey_switches_mode(self):
+        translator.apply_hotkey('ctrl+c')
+        self.assertEqual(translator._hotkey.spec['mode'], 'combo')
+        translator.apply_hotkey(translator.DEFAULT_HOTKEY)
+        self.assertEqual(translator._hotkey.spec['mode'], 'double')
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
@@ -642,6 +735,72 @@ class GlassTests(unittest.TestCase):
         manager = self._show_popup(glass=False)
         self.assertEqual(manager.popup.cget('bg'), translator.BG)
         self.assertAlmostEqual(float(manager.popup.attributes('-alpha')), 0.94, places=2)
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Windows-only application')
+class FontSizeTests(unittest.TestCase):
+    """字号设置：保存、范围、渲染和经典主题都要跟着变。"""
+
+    def setUp(self):
+        self.addCleanup(translator.set_glass_style, translator.get_glass_style())
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.config = Path(directory.name) / 'translator_config.ini'
+        config_patch = patch.object(translator, 'CONFIG_FILE', str(self.config))
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+
+    def test_font_size_round_trip(self):
+        translator.set_glass_style({'font_orig': 18, 'font_text': 22})
+        translator.save_glass_style(translator.get_glass_style())
+        translator.set_glass_style(translator.GLASS_DEFAULT_STYLE)
+        translator.load_glass_style()
+        self.assertEqual(translator.GLASS_FONT_ORIG, 18)
+        self.assertEqual(translator.GLASS_FONT_TEXT, 22)
+
+    def test_font_size_is_clamped_to_its_range(self):
+        translator.set_glass_style({'font_orig': '999', 'font_text': '1'})
+        self.assertEqual(translator.GLASS_FONT_ORIG, 28)
+        self.assertEqual(translator.GLASS_FONT_TEXT, 10)
+
+    def test_metrics_follow_the_configured_font_size(self):
+        translator.set_glass_style({'font_orig': 12, 'font_text': 15})
+        small = translator._glass_metrics('原文', '译文', 1.0)
+        translator.set_glass_style({'font_orig': 20, 'font_text': 24})
+        large = translator._glass_metrics('原文', '译文', 1.0)
+        self.assertEqual(small['orig_font'].size, 12)
+        self.assertEqual(large['orig_font'].size, 20)
+        self.assertEqual(large['text_font'].size, 24)
+        self.assertGreater(large['height'], small['height'])
+
+    def test_old_config_without_font_size_keeps_the_defaults(self):
+        self.config.write_text('[glass]\nblur = 12\n', encoding='utf-8')
+        translator.set_glass_style(translator.GLASS_DEFAULT_STYLE)
+        translator.load_glass_style()
+        self.assertEqual(translator.GLASS_FONT_ORIG,
+                         translator.GLASS_DEFAULT_STYLE['font_orig'])
+        self.assertEqual(translator.GLASS_BLUR, 12)
+
+    def test_classic_popup_follows_the_configured_font_size(self):
+        root = make_root(self)
+        translator.set_glass_style({'font_orig': 20, 'font_text': 26})
+        manager = translator.PopupManager(root, poll=False)
+        with patch.object(translator, 'glass_supported', return_value=False):
+            manager._show('original', '翻译中…', 100, 100)
+        frame = manager.popup.winfo_children()[0]
+        original = frame.winfo_children()[0]
+        result = frame.winfo_children()[2]
+        self.assertEqual(int(re.search(r'(\d+)\s*\)?$', original.cget('font')).group(1)), 17)
+        self.assertEqual(int(re.search(r'(\d+)\s*\)?$', result.cget('font')).group(1)), 22)
+
+    def test_tray_menu_offers_the_appearance_editor(self):
+        root = make_root(self)
+        with patch.object(translator.pystray, 'Icon') as icon:
+            translator.setup_tray(root)
+        menu = icon.call_args.args[3]
+        texts = [item.text for item in menu if isinstance(getattr(item, 'text', None), str)]
+        self.assertIn('外观设置（字体 / 颜色）', texts)
+        self.assertIn('接口设置（API Key / 模型）', texts)
 
 
 if __name__ == '__main__':
